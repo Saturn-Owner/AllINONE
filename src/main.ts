@@ -10,6 +10,7 @@ import { clearServerBaseline, pollServerSync, renderServers, renderSync, schedul
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { strToU8, zipSync } from "fflate";
+import { gateLockArtwork, revealWorkspace } from "./unlock-animation";
 
 const STORAGE_KEY = "allinone.vault.v1";
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -93,6 +94,7 @@ async function changeData(update: (data: VaultData) => void): Promise<void> {
 
 function renderGate(): void {
   const hasVault = localStorage.getItem(STORAGE_KEY) !== null;
+  let gateBusy = false;
   app.innerHTML = `
     <main class="gate">
       <div class="gate-brand"><span class="brand-mark">A</span><span>AllINONE</span></div>
@@ -104,7 +106,7 @@ function renderGate(): void {
           <div class="intro-points"><span>◈ Lokal nutzbar</span><span>◈ Verschlüsselter Tresor</span><span>◈ Installierbar</span></div>
         </section>
         <section class="gate-card">
-          <div class="card-icon">✦</div>
+          <div class="card-icon gate-lock" aria-hidden="true">${gateLockArtwork}</div>
           <h2>${hasVault ? "Willkommen zurück" : "Deinen Raum einrichten"}</h2>
           <p>${hasVault ? "Entsperre deinen lokalen Tresor." : "Erstelle eine Passphrase mit mindestens 14 Zeichen. Sie kann nicht wiederhergestellt werden."}</p>
           <form id="vault-form">
@@ -124,9 +126,17 @@ function renderGate(): void {
 
   document.querySelector<HTMLFormElement>("#vault-form")!.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (gateBusy) return;
     const passphrase = document.querySelector<HTMLInputElement>("#passphrase")!.value;
     const button = document.querySelector<HTMLButtonElement>("#vault-form button")!;
+    const form = document.querySelector<HTMLFormElement>("#vault-form")!;
+    const originalLabel = button.innerHTML;
+    gateBusy = true;
     button.disabled = true;
+    button.classList.add("is-opening");
+    button.textContent = hasVault ? "Wird entsperrt …" : "Wird eingerichtet …";
+    form.setAttribute("aria-busy", "true");
+    announce("");
     try {
       if (hasVault) {
         const envelope = storedEnvelope()!;
@@ -141,17 +151,23 @@ function renderGate(): void {
         clearServerBaseline();
         session = created;
       }
-      render();
+      await revealWorkspace(app, render);
       pollNow();
     } catch (error) {
       announce(error instanceof Error ? error.message : "Tresor konnte nicht geöffnet werden.", true);
       button.disabled = false;
+      button.classList.remove("is-opening");
+      button.innerHTML = originalLabel;
+    } finally {
+      gateBusy = false;
+      form.removeAttribute("aria-busy");
     }
   });
 
   document.querySelector<HTMLInputElement>("#import-file")!.addEventListener("change", async (event) => {
     const file = (event.target as HTMLInputElement).files?.[0];
-    if (!file) return;
+    if (!file || gateBusy) return;
+    gateBusy = true;
     try {
       if (file.size > 10_000_000) throw new Error("Sicherung ist zu groß (maximal 10 MB).");
       const passphrase = document.querySelector<HTMLInputElement>("#passphrase")!.value;
@@ -162,9 +178,11 @@ function renderGate(): void {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
       clearServerBaseline();
       session = { data, key, envelope };
-      render();
+      await revealWorkspace(app, render);
     } catch (error) {
       announce(error instanceof Error ? error.message : "Import fehlgeschlagen.", true);
+    } finally {
+      gateBusy = false;
     }
   });
 }

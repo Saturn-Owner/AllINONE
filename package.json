@@ -12,7 +12,7 @@
     "preview": "vite preview --host 0.0.0.0",
     "package:linux": "npm run build && python3 scripts/package-preview.py",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
-    "test:ui": "npm run build && node --test tests/ui.test.mjs",
+    "test:ui": "npm run build && node --test tests/ui.test.mjs tests/ui.unlock.test.mjs",
     "test:ui:server": "npm run build && node --test tests/ui.server.test.mjs",
     "test:ui:drive": "npm run build && node --test tests/ui.drive.test.mjs",
     "test:server": "node --test tests/server.test.mjs",

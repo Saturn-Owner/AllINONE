@@ -41,6 +41,7 @@ Die von Vite angezeigte Adresse öffnen. Für die installierbare Fassung `npm ru
 
 ## Funktionen
 
+- Entsperranimation mit öffnendem Schloss, Lichtkreisen und weichem Übergang zum Workspace. Sie erscheint nach erfolgreichem Entsperren; die Systemeinstellung „Bewegung reduzieren“ überspringt sie.
 - Dashboard mit Aufgaben, Fälligkeiten, Notizen, Zugangszahl und Kontostand.
 - Aufgaben mit Priorität, Termin und Erledigt-Status.
 - Markdown-Notizen mit Vorschau, Suche, Wiki-Links und Rückverweisen, Wissensgraph, Markdown-Import und ZIP-Export. Die Vorschau filtert aktiven HTML-Inhalt. Obsidian selbst und seine Plugins sind nicht eingebettet.

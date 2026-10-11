@@ -1,8 +1,8 @@
 {
   "format": 1,
   "version": "0.1.0",
-  "build": "f3ba76136f439ea21ed4f2e17f9f19ee1ffc2db0e977da25ab3337608a6ac3ff",
-  "archive": "versions/f3ba76136f439ea21ed4f2e17f9f19ee1ffc2db0e977da25ab3337608a6ac3ff.zip",
-  "sha256": "8d9cb29e6d6564f9ddae08b6ccbd28ca9fa475cb5afbc71cf3e2856b5b714e3b",
-  "size": 77337
+  "build": "a87f5e6abcb9ad398c6c41839c72ac080f5f2cd2b7074d34971130e0806ea176",
+  "archive": "versions/a87f5e6abcb9ad398c6c41839c72ac080f5f2cd2b7074d34971130e0806ea176.zip",
+  "sha256": "418395e8889d6c1f1cff679d01aca838c6d7a3ab079ecce78ee5e6e6f4857342",
+  "size": 79366
 }

@@ -9,3 +9,51 @@
 @media(max-width:690px){.sidebar nav[aria-label="Verbindungen"]{display:flex}.sidebar nav{overflow-x:auto}.sidebar nav+nav{margin-top:3px}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.inline-field{flex-wrap:wrap}.inline-field input{flex-basis:100%}.credential-row .credential-info{flex-basis:100%}.note-tools input[type=search]{flex-basis:100%;width:100%}.topbar{gap:6px}}
 #mobile-lock{display:none}@media(max-width:690px){#mobile-lock{display:inline-flex}.topbar>span{display:none}.topbar>div{display:flex;gap:8px;width:100%;justify-content:space-between}}
 .muted{font-size:13px;color:#73819a;line-height:1.6}.button-row.wrap{flex-wrap:wrap}.server-output{padding:16px;border-radius:12px;background:#17253d;color:#e5edff;overflow:auto;white-space:pre-wrap;font-size:12px;line-height:1.6}.upload-label{display:inline-block;margin-top:16px!important}.panel>select,.panel>input{margin:8px 10px 10px 0}.panel>button{margin:8px 8px 8px 0}.finance-row>span:first-child{flex:1}
+
+.gate-lock svg{width:36px;height:36px}
+.unlock-shackle{stroke:#758be0;stroke-width:7;stroke-linecap:round}
+.unlock-lock-body{fill:#748ae011;stroke:#758be0;stroke-width:5}
+.unlock-keyhole{fill:#758be0}
+.unlock-keyhole-stem{stroke:#758be0;stroke-width:4;stroke-linecap:round}
+.primary.is-opening{justify-content:center;gap:12px}
+.primary.is-opening::after{content:"";width:16px;height:16px;flex:none;border:2px solid #ffffff55;border-top-color:#fff;border-radius:50%;animation:unlock-spinner .75s linear infinite}
+.unlock-scene{position:fixed;inset:0;z-index:200;display:grid;place-items:center;overflow:hidden;color:#f4f7ff;background:radial-gradient(ellipse at 50% 42%,#243556 0%,#141e32 47%,#101827 100%);animation:unlock-scene-out .36s .92s ease-in both}
+.unlock-scene-grid{position:absolute;inset:0;pointer-events:none;background-image:linear-gradient(#a4bbff08 1px,transparent 1px),linear-gradient(90deg,#a4bbff08 1px,transparent 1px);background-size:54px 54px;mask-image:radial-gradient(ellipse at center,#000 0%,transparent 70%)}
+.unlock-center{position:relative;text-align:center;width:min(100%,440px);padding:24px;animation:unlock-center-in .35s ease-out both}
+.unlock-orb{position:relative;width:240px;height:240px;margin:0 auto 14px;display:grid;place-items:center}
+.unlock-halo{position:absolute;width:145px;height:145px;border-radius:50%;background:radial-gradient(circle,#7ee9d64d,#8c9dff30 55%,transparent 72%);filter:blur(15px);animation:unlock-halo-bloom .8s .1s ease-out both}
+.unlock-orbit{position:absolute;inset:0;width:100%;height:100%;animation:unlock-orbit-turn 1.3s ease-out both}
+.unlock-orbit circle:first-child{stroke:#8b9ffb32;stroke-width:1}
+.unlock-orbit circle:last-child{stroke:#92e5d475;stroke-width:1.5;stroke-dasharray:2 12;stroke-linecap:round}
+.unlock-wave{position:absolute;inset:36px;border:1px solid #94efd9aa;border-radius:50%;animation:unlock-wave-expand .75s .25s ease-out both}
+.unlock-lock{position:relative;width:120px;height:120px;filter:drop-shadow(0 0 20px #9baeff32)}
+.unlock-lock svg{display:block;width:100%;height:100%;overflow:visible}
+.unlock-scene .unlock-lock-body{fill:#a1b8ff14;stroke:#b8caff;stroke-width:3}
+.unlock-scene .unlock-shackle{stroke:#b8caff;stroke-width:7;transform-origin:40px 55px;animation:unlock-shackle-open .43s .12s cubic-bezier(.2,.8,.2,1) both}
+.unlock-scene .unlock-keyhole{fill:#98eed8}
+.unlock-scene .unlock-keyhole-stem{stroke:#98eed8}
+.unlock-sparks{position:absolute;inset:0;pointer-events:none}
+.unlock-sparks span{position:absolute;left:calc(50% - 2px);top:calc(50% - 2px);width:4px;height:4px;border-radius:50%;background:#b3f0e3;box-shadow:0 0 10px #a5eedd88;animation:unlock-sparks-out .72s .32s ease-out both}
+.unlock-sparks span:nth-child(1){--x:0px;--y:-112px}
+.unlock-sparks span:nth-child(2){--x:84px;--y:-84px}
+.unlock-sparks span:nth-child(3){--x:118px;--y:0px}
+.unlock-sparks span:nth-child(4){--x:84px;--y:84px}
+.unlock-sparks span:nth-child(5){--x:0px;--y:116px}
+.unlock-sparks span:nth-child(6){--x:-84px;--y:84px}
+.unlock-sparks span:nth-child(7){--x:-118px;--y:0px}
+.unlock-sparks span:nth-child(8){--x:-84px;--y:-84px}
+.unlock-eyebrow{display:block;font-size:10px;letter-spacing:.22em;font-weight:800;color:#9cdfcf}
+.unlock-center h2{font-size:36px;letter-spacing:-.04em;margin:12px 0 9px;line-height:1.2}
+.unlock-center p{font-size:14px;color:#a5b3d0;margin:0}
+.unlock-workspace-enter{animation:unlock-workspace-in .45s .8s cubic-bezier(.2,.8,.2,1) both}
+@keyframes unlock-spinner{to{transform:rotate(360deg)}}
+@keyframes unlock-center-in{from{opacity:0;transform:translateY(12px) scale(.97)}to{opacity:1;transform:translateY(0) scale(1)}}
+@keyframes unlock-shackle-open{from{transform:translateY(0) rotate(0deg)}to{transform:translateY(-8px) rotate(-28deg)}}
+@keyframes unlock-halo-bloom{from{opacity:.3;transform:scale(.65)}to{opacity:1;transform:scale(1.25)}}
+@keyframes unlock-orbit-turn{from{opacity:0;transform:rotate(-40deg) scale(.92)}35%{opacity:1}to{opacity:.8;transform:rotate(35deg) scale(1)}}
+@keyframes unlock-wave-expand{from{opacity:0;transform:scale(.5)}20%{opacity:.85}to{opacity:0;transform:scale(1.7)}}
+@keyframes unlock-sparks-out{from{opacity:0;transform:translate(0,0) scale(0)}30%{opacity:1}to{opacity:0;transform:translate(var(--x),var(--y)) scale(.5)}}
+@keyframes unlock-scene-out{from{opacity:1}to{opacity:0}}
+@keyframes unlock-workspace-in{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+@media(max-width:690px){.unlock-orb{width:220px;height:220px}.unlock-center h2{font-size:30px}.unlock-center{padding:20px}}
+@media(prefers-reduced-motion:reduce){.primary.is-opening::after,.unlock-scene,.unlock-center,.unlock-halo,.unlock-orbit,.unlock-wave,.unlock-scene .unlock-shackle,.unlock-sparks span,.unlock-workspace-enter{animation:none!important}}
