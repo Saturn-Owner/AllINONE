@@ -1,0 +1,7 @@
+services:
+  allinone:
+    environment:
+      HOSTS_FILE: /config/hosts.json
+    volumes:
+      - ./config/hosts.json:/config/hosts.json:ro
+      - ./keys:/keys:ro

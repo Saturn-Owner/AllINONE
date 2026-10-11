@@ -1,0 +1,15 @@
+services:
+  allinone:
+    build: .
+    restart: unless-stopped
+    environment:
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?HTTPS domain required}
+      APP_PASSWORD_HASH: ${APP_PASSWORD_HASH:?Password hash required}
+      DATA_DIR: /data
+      PORT: 4174
+    ports:
+      - "127.0.0.1:4174:4174"
+    volumes:
+      - allinone-data:/data
+volumes:
+  allinone-data:

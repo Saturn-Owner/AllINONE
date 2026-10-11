@@ -1,0 +1,10 @@
+node_modules
+dist
+.git
+.npm-cache
+.docker
+.env
+.env.*
+data
+config
+keys

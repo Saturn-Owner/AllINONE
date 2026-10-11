@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.npm-cache/
+.docker/
+.env
+.env.*
+data/
+config/
+keys/
+.DS_Store
+__pycache__/
