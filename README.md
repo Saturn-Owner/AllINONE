@@ -8,6 +8,28 @@ Installierbare Web-App (PWA) für Dashboard, Aufgaben, Markdown-Notizen, Zugangs
 
 Für einen lokalen Test ohne Node.js enthält `downloads/AllINONE-Linux-Test.zip` die gebaute App und einen Python-Starter. Das ZIP vollständig entpacken, im Ordner `AllINONE-Linux-Test` ein Terminal öffnen und `python3 starten.py` ausführen. Der Browser öffnet `http://localhost:4175/`; das Terminal während des Testens offen lassen. Dieses Paket enthält die lokale Oberfläche. Mit `npm run package:linux` lässt es sich nach Änderungen neu bauen.
 
+### Linux-Testpaket aktualisieren
+
+Die laufende Vorschau mit **Strg+C** beenden. Im entpackten Ordner mit `starten.py` einmalig den Aktualisierer für ein älteres Paket installieren:
+
+```bash
+curl -fL https://raw.githubusercontent.com/Saturn-Owner/AllINONE/main/scripts/update-preview.py -o aktualisieren.py && python3 aktualisieren.py
+```
+
+Danach reicht für jedes weitere Update:
+
+```bash
+python3 aktualisieren.py
+```
+
+Der Befehl liest die aktuelle Paketversion auf `main` und lädt das dazugehörige Archiv mit einem eindeutigen Dateinamen samt SHA-256-Prüfsumme. Ein unverändertes Paket wird nicht erneut installiert. Ungültige Pakete ersetzen keine Dateien; bei einem Fehler während des Ersetzens wird der alte Dateistand wiederhergestellt. Die Prüfsumme prüft die Unversehrtheit, sie ist keine unabhängige Signatur. Updates vertrauen dem Code im Repository. Python 3 und Internetzugang reichen für den Aktualisierer.
+
+Anschließend `python3 starten.py` ausführen und die Browserseite neu laden. Denselben Browser, dasselbe Profil und **`http://localhost:4175/`** weiterverwenden: Der verschlüsselte Tresor liegt im Browser und wird vom Update nicht bearbeitet. Vor Updates eine verschlüsselte Sicherung exportieren. Ein Wechsel zu `127.0.0.1`, einem anderen Port oder einem anderen Browserprofil verwendet einen anderen lokalen Speicher.
+
+Bei Änderungen der App vor dem Veröffentlichen `npm run package:linux` ausführen und **`downloads/` gemeinsam** mit dem Quellcode committen. Vorhandene Archive unter `downloads/versions/` erhalten: So funktionieren Updates auch während einer gleichzeitig veröffentlichten neuen Version. Der Build erzeugt eine eigene Offline-Cache-Version, damit die installierte PWA neue App-Dateien lädt.
+
+### Entwicklung mit Node.js
+
 Node.js 24 ist erforderlich (siehe `.node-version`).
 
 ```bash
@@ -65,6 +87,7 @@ npm run test:ui
 npm run test:ui:server
 npm run test:ui:drive
 npm run test:ssh
+python3 -m unittest discover -s tests -p 'test_updater.py'
 npm run build
 ```
 

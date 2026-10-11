@@ -7,12 +7,18 @@ import threading
 import webbrowser
 
 
+class PreviewHandler(SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
+
+
 def main():
     app_directory = Path(__file__).resolve().parent / "app"
     if not (app_directory / "index.html").is_file():
         raise SystemExit("Die App-Dateien fehlen. Bitte das gesamte ZIP entpacken.")
     url = "http://localhost:4175/"
-    handler = partial(SimpleHTTPRequestHandler, directory=str(app_directory))
+    handler = partial(PreviewHandler, directory=str(app_directory))
     try:
         server = ThreadingHTTPServer(("127.0.0.1", 4175), handler)
     except OSError:
