@@ -1,20 +1,28 @@
 import "./style.css";
 import {
-  createVault, encryptVault, parseEnvelope, unlockVault,
+  DEFAULT_PREFERENCES, createVault, encryptVault, parseEnvelope, unlockVault,
   type Note, type Priority, type Task, type VaultData, type VaultEnvelope
 } from "./vault";
 import { balance, formatEuro } from "./domain";
 import { wikiLinks } from "./domain";
-import { renderFinances, renderPasswords, type ViewContext } from "./features";
-import { clearServerBaseline, pollServerSync, renderServers, renderSync, scheduleServerSync, type ConnectContext } from "./connect";
+import { openPassword, renderFinances, renderPasswords, type ViewContext } from "./features";
+import { clearServerBaseline, getSyncStatus, pollServerSync, renderServers, renderSync, scheduleServerSync, type ConnectContext } from "./connect";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { strToU8, zipSync } from "fflate";
 import { gateLockArtwork, revealWorkspace } from "./unlock-animation";
+import { renderAdvancedTasks } from "./tasks";
+import { appendNoteExtras, rememberNote } from "./note-extras";
+import { renderFinanceExtras } from "./finance-extras";
+import { backupError, saveBackup } from "./backups";
+import { completeTask, downloadFile } from "./productivity";
+import { addGlobalSearch, dashboardTools, renderSettings, checkReminders, captureSharedLink } from "./workspace-extras";
+import { renderAI } from "./ai";
+
 
 const STORAGE_KEY = "allinone.vault.v1";
 const app = document.querySelector<HTMLDivElement>("#app")!;
-type Tab = "dashboard" | "tasks" | "notes" | "passwords" | "finances" | "servers" | "sync";
+type Tab = "dashboard" | "tasks" | "notes" | "passwords" | "finances" | "servers" | "sync" | "settings" | "ai";
 
 let session: { data: VaultData; key: CryptoKey; envelope: VaultEnvelope } | null = null;
 let tab: Tab = "dashboard";
@@ -22,12 +30,20 @@ let editingNote: string | null = null;
 let lastActivity = Date.now();
 let changeQueue = Promise.resolve();
 let pendingChanges = 0;
+let draftDirty = false;
+window.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+    const search = document.querySelector<HTMLInputElement>('.global-search input');
+    if (search) { event.preventDefault(); search.focus(); }
+  }
+});
+document.addEventListener("input", (event) => { if ((event.target as HTMLElement).closest("form")) draftDirty = true; });
 
 for (const eventName of ["pointerdown", "keydown"]) {
   window.addEventListener(eventName, () => { lastActivity = Date.now(); }, { passive: true });
 }
 window.setInterval(() => {
-  if (session && Date.now() - lastActivity > 15 * 60 * 1000) {
+  if (session && Date.now() - lastActivity > (session.data.preferences || DEFAULT_PREFERENCES).lockMinutes * 60 * 1000) {
     session = null;
     tab = "dashboard";
     render();
@@ -36,10 +52,12 @@ window.setInterval(() => {
 
 function pollNow(): void {
   const active = session;
-  if (!active || pendingChanges) return;
+  if (!active || pendingChanges || draftDirty) return;
   void pollServerSync(active.envelope, active.key, (envelope, data) => {
     if (!session || session.envelope.cipher.data !== active.envelope.cipher.data) return false;
+    void saveBackup(JSON.stringify(active.envelope)).catch(() => undefined);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
+    void saveBackup(JSON.stringify(envelope)).catch(() => undefined);
     session = { ...session, data, envelope };
     render();
     return true;
@@ -78,12 +96,15 @@ async function changeData(update: (data: VaultData) => void): Promise<void> {
   pendingChanges++;
   const pending = changeQueue.then(async () => {
     const active = session;
-    if (!active) return;
+    if (!active) throw new Error("Tresor ist gesperrt. Bitte erneut entsperren.");
     const next = structuredClone(active.data);
     update(next);
     const envelope = await encryptVault(next, active.key, active.envelope.kdf.salt);
-    if (session !== active) return;
+    if (session !== active) throw new Error("Der Tresor wurde zwischenzeitlich gesperrt oder geändert. Bitte erneut versuchen.");
+    await saveBackup(JSON.stringify(active.envelope)).catch(() => undefined);
+    if (session !== active) throw new Error("Der Tresor wurde zwischenzeitlich gesperrt oder geändert. Bitte erneut versuchen.");
     localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
+    void saveBackup(JSON.stringify(envelope)).catch(() => undefined);
     session = { ...active, data: next, envelope };
     render();
     scheduleServerSync();
@@ -116,6 +137,7 @@ function renderGate(): void {
             <button class="primary full" type="submit">${hasVault ? "Tresor entsperren" : "Tresor erstellen"}<span aria-hidden="true">→</span></button>
           </form>
           <div id="message" class="message" role="status" aria-live="polite"></div>
+${hasVault ? '<button id="locked-backup" class="outline-button full" type="button">Verschlüsselten Tresor sichern</button>' : ""}
           <div class="gate-divider">oder</div>
           <label class="import-label" for="import-file">Verschlüsselte Sicherung importieren</label>
           <input id="import-file" class="visually-hidden" type="file" accept="application/json,.json" />
@@ -123,6 +145,8 @@ function renderGate(): void {
         </section>
       </div>
     </main>`;
+
+  document.querySelector("#locked-backup")?.addEventListener("click", () => { const raw = localStorage.getItem(STORAGE_KEY); if (raw) downloadFile(`allinone-sicherung-${new Date().toISOString().slice(0, 10)}.json`, raw); });
 
   document.querySelector<HTMLFormElement>("#vault-form")!.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -151,6 +175,8 @@ function renderGate(): void {
         clearServerBaseline();
         session = created;
       }
+      lastActivity = Date.now();
+      void saveBackup(JSON.stringify(session!.envelope)).catch(() => undefined);
       await revealWorkspace(app, render);
       pollNow();
     } catch (error) {
@@ -175,9 +201,13 @@ function renderGate(): void {
       const envelope = parseEnvelope(await file.text());
       const { data, key } = await unlockVault(envelope, passphrase);
       if (hasVault && !window.confirm("Den bestehenden lokalen Tresor durch diese Sicherung ersetzen?")) return;
+      const previous = localStorage.getItem(STORAGE_KEY);
+      if (previous) await saveBackup(previous);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
+      void saveBackup(JSON.stringify(envelope)).catch(() => undefined);
       clearServerBaseline();
       session = { data, key, envelope };
+      lastActivity = Date.now();
       await revealWorkspace(app, render);
     } catch (error) {
       announce(error instanceof Error ? error.message : "Import fehlgeschlagen.", true);
@@ -198,17 +228,23 @@ function renderShell(): void {
           <button data-tab="tasks"><span>✓</span> Aufgaben</button>
           <button data-tab="notes"><span>▤</span> Notizen</button>
           <button data-tab="passwords"><span>⌘</span> Passwörter</button>
-          <button data-tab="finances"><span>◈</span> Finanzen</button>
+          <button data-tab="finances"><span>◈</span> Finanzen</button><button data-tab="ai"><span>✧</span> KI-Assistent</button><button data-tab="settings"><span>⚙</span> Einstellungen</button>
         </nav>
         <div class="nav-label later">VERBINDEN</div>
         <nav aria-label="Verbindungen"><button data-tab="sync"><span>↗</span> Synchronisation</button><button data-tab="servers"><span>▣</span> VPS</button></nav>
-        <div class="sidebar-bottom"><div class="local-badge"><span class="status-dot"></span> Lokal & verschlüsselt</div><button id="lock-button" class="text-button">⇥ Tresor sperren</button></div>
+        <div class="sidebar-bottom"><div class="local-badge"><span class="status-dot"></span> Lokal & verschlüsselt</div><small id="backup-status"></small><button id="lock-button" class="text-button">⇥ Tresor sperren</button></div>
       </aside>
       <div class="main-column">
-        <header class="topbar"><span>Dein persönlicher Workspace</span><div><button id="mobile-lock" class="outline-button">Sperren</button> <button id="export-button" class="outline-button">↓ Sicherung exportieren</button></div></header>
-        <main id="content" class="content"></main>
+        <header class="topbar"><span id="sync-status" class="sync-status" role="status"></span><div><button id="mobile-lock" class="outline-button">Sperren</button> <button id="export-button" class="outline-button">↓ Sicherung exportieren</button></div></header>
+        <div id="reminder-banner" class="reminder-banner" role="status"></div><main id="content" class="content"></main>
       </div>
     </div>`;
+  document.querySelector("#sync-status")!.textContent = getSyncStatus();
+  document.querySelector("#backup-status")!.textContent = backupError;
+  addGlobalSearch(document.querySelector<HTMLElement>(".topbar")!, session!.data, (kind, id) => {
+    if (kind === "passwords") openPassword(id);
+    tab = kind as Tab; editingNote = kind === "notes" ? id : null; render();
+  });
   document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach((button) => {
     button.classList.toggle("active", button.dataset.tab === tab);
     button.addEventListener("click", () => { tab = button.dataset.tab as Tab; editingNote = null; render(); });
@@ -255,7 +291,7 @@ function taskList(tasks: Task[], emptyText: string): HTMLElement {
     checkbox.checked = task.done;
     checkbox.setAttribute("aria-label", `Aufgabe ${task.title} abschließen`);
     checkbox.addEventListener("change", () => {
-      changeData((data) => { const item = data.tasks.find((entry) => entry.id === task.id); if (item) item.done = checkbox.checked; })
+      changeData((data) => { completeTask(data, task.id, checkbox.checked); })
         .catch(() => { checkbox.checked = !checkbox.checked; window.alert("Speichern fehlgeschlagen."); });
     });
     const text = element("div", "task-text");
@@ -325,26 +361,6 @@ function renderDashboard(content: HTMLElement): void {
   grid.append(tasks, notes);
   content.append(grid);
   content.append(element("p", "hint", "Dein Tresor bleibt verschlüsselt. Exportiere regelmäßig eine Sicherung."));
-}
-
-function renderTasks(content: HTMLElement): void {
-  content.append(heading("DEIN FOKUS", "Aufgaben", "Was ansteht, auf einen Blick. Eins nach dem anderen."));
-  const panel = element("section", "panel");
-  panel.innerHTML = '<h2>Neue Aufgabe</h2><form id="task-form" class="task-form"><label for="task-title">Titel</label><input id="task-title" type="text" maxlength="160" placeholder="Was möchtest du erledigen?" required /><div class="form-pair"><div><label for="task-due">Fällig am</label><input id="task-due" type="date" /></div><div><label for="task-priority">Priorität</label><select id="task-priority"><option value="mittel">Mittel</option><option value="niedrig">Niedrig</option><option value="hoch">Hoch</option></select></div></div><button class="primary" type="submit">Aufgabe hinzufügen +</button></form>';
-  panel.querySelector<HTMLFormElement>("form")!.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const title = panel.querySelector<HTMLInputElement>("#task-title")!.value.trim();
-    if (!title) return;
-    const due = panel.querySelector<HTMLInputElement>("#task-due")!.value || null;
-    const priority = panel.querySelector<HTMLSelectElement>("#task-priority")!.value as Priority;
-    try {
-      await changeData((data) => data.tasks.push({ id: crypto.randomUUID(), title, due, priority, done: false, createdAt: new Date().toISOString() }));
-    } catch { window.alert("Aufgabe konnte nicht gespeichert werden."); }
-  });
-  content.append(panel);
-  const listPanel = element("section", "panel list-panel");
-  listPanel.append(element("h2", "", `Deine Aufgaben (${session!.data.tasks.length})`), taskList(sortedTasks(), "Noch keine Aufgaben. Beginne mit einer kleinen Sache."));
-  content.append(listPanel);
 }
 
 function renderNotes(content: HTMLElement): void {
@@ -426,20 +442,23 @@ function renderNotes(content: HTMLElement): void {
     try {
       await changeData((data) => {
         const note = data.notes.find((entry) => entry.id === editingNote);
-        if (note) { note.title = title; note.body = body; note.updatedAt = new Date().toISOString(); }
-        else data.notes.push({ id: crypto.randomUUID(), title, body, updatedAt: new Date().toISOString() });
+        const folder = editor.querySelector<HTMLInputElement>("#note-folder")!.value.trim();
+        const tags = [...new Set(editor.querySelector<HTMLInputElement>("#note-tags")!.value.split(",").map((t) => t.trim()).filter(Boolean))];
+        if (note) { if (note.title !== title || note.body !== body) rememberNote(note); Object.assign(note, { title, body, folder, tags, updatedAt: new Date().toISOString() }); }
+        else data.notes.push({ id: crypto.randomUUID(), title, body, folder, tags, updatedAt: new Date().toISOString() });
       });
       editingNote = null;
       render();
     } catch { window.alert("Notiz konnte nicht gespeichert werden."); }
   });
+  appendNoteExtras(editor, selected, changeData);
   content.append(editor);
   const notes = element("section", "panel list-panel");
   notes.append(element("h2", "", `Alle Notizen (${session!.data.notes.length})`));
   const list = element("div", "notes-grid");
   for (const note of [...session!.data.notes].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))) {
     const card = element("article", "note-card");
-    card.append(element("strong", "", note.title), element("p", "", note.body.slice(0, 180) || "Leere Notiz"));
+    card.append(element("strong", "", note.title), element("small", "tag-list", [note.folder, ...(note.tags || []).map((t) => `#${t}`)].filter(Boolean).join(" · ")), element("p", "", note.body.slice(0, 180) || "Leere Notiz"));
     const actions = element("div", "note-actions");
     const edit = element("button", "text-button", "Bearbeiten");
     edit.addEventListener("click", () => { editingNote = note.id; render(); document.querySelector<HTMLInputElement>("#note-title")?.focus(); });
@@ -454,10 +473,14 @@ function renderNotes(content: HTMLElement): void {
     card.append(actions);
     list.append(card);
   }
-  search.addEventListener("input", () => {
+  const folderFilter = element("select"); folderFilter.setAttribute("aria-label", "Notizordner"); folderFilter.add(new Option("Alle Ordner", ""));
+  [...new Set(session!.data.notes.map((n) => n.folder || "").filter(Boolean))].sort().forEach((f) => folderFilter.add(new Option(f, f)));
+  tools.prepend(folderFilter);
+  const filterNotes = () => {
     const query = search.value.toLocaleLowerCase();
-    list.querySelectorAll<HTMLElement>(".note-card").forEach((card) => { card.hidden = !card.textContent?.toLocaleLowerCase().includes(query); });
-  });
+    list.querySelectorAll<HTMLElement>(".note-card").forEach((card, index) => { const note = [...session!.data.notes].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[index]; card.hidden = !`${note.title} ${note.body} ${note.folder || ""} ${(note.tags || []).join(" ")}`.toLocaleLowerCase().includes(query) || Boolean(folderFilter.value && note.folder !== folderFilter.value); });
+  };
+  search.addEventListener("input", filterNotes); folderFilter.addEventListener("change", filterNotes);
   if (!session!.data.notes.length) list.append(element("p", "empty", "Noch keine Notizen vorhanden."));
   notes.append(list);
   content.append(notes);
@@ -506,32 +529,47 @@ function noteGraph(notes: Note[]): HTMLElement {
 }
 
 function render(): void {
+  draftDirty = false;
   if (!session) { renderGate(); return; }
+  const action = new URLSearchParams(location.search).get("action");
+  if (action && ["task", "note"].includes(action)) { tab = action === "task" ? "tasks" : "notes"; history.replaceState(null, "", location.pathname); }
   renderShell();
   const content = document.querySelector<HTMLElement>("#content")!;
   if (tab === "dashboard") renderDashboard(content);
-  if (tab === "tasks") renderTasks(content);
+
   if (tab === "notes") renderNotes(content);
   const context: ViewContext = { content, data: session.data, changeData, render, heading, element };
+  if (tab === "dashboard") dashboardTools(context, (next) => { tab = next as Tab; render(); });
+  if (tab === "tasks") renderAdvancedTasks(context);
   if (tab === "passwords") renderPasswords(context);
-  if (tab === "finances") renderFinances(context);
-  if (tab === "servers" || tab === "sync") {
+  if (tab === "finances") { renderFinances(context); renderFinanceExtras(context); }
+  if (tab === "ai") renderAI(context);
+  if (tab === "servers" || tab === "sync" || tab === "settings") {
     const connected: ConnectContext = {
       ...context,
       envelope: session.envelope,
       replaceVault: async (envelope, passphrase) => {
         const { data, key } = await unlockVault(envelope, passphrase);
+        const previous = localStorage.getItem(STORAGE_KEY);
+        if (previous) await saveBackup(previous);
         localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
+        void saveBackup(JSON.stringify(envelope)).catch(() => undefined);
+        clearServerBaseline();
         session = { data, key, envelope };
         render();
       },
       navigate: (next) => { tab = next; render(); }
     };
-    if (tab === "sync") renderSync(connected);
+    if (tab === "settings") renderSettings(connected);
+    else if (tab === "sync") renderSync(connected);
     else renderServers(connected);
   }
+  checkReminders(context);
+  captureSharedLink(context);
 }
 
+window.setInterval(() => { const badge = document.querySelector("#sync-status"); if (badge) badge.textContent = getSyncStatus(); const backup = document.querySelector("#backup-status"); if (backup) backup.textContent = backupError; }, 3000);
+window.setInterval(() => { if (session) checkReminders({ data: session.data } as ViewContext); }, 15_000);
 render();
 if (import.meta.env.PROD && "serviceWorker" in navigator) {
   window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js", { updateViaCache: "none" }).catch(() => undefined));

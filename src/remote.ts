@@ -130,3 +130,6 @@ export async function downloadDriveSnapshot(id: string): Promise<VaultEnvelope> 
   const response = await driveFetch(`/drive/v3/files/${id}?alt=media`);
   return parseEnvelope(await response.text());
 }
+
+export interface HostMetrics { cpuPercent: number; memoryTotal: number; memoryUsed: number; memoryPercent: number; diskTotal: number; diskUsed: number; diskPercent: number; checkedAt: string }
+export function getHostMetrics(id: string): Promise<HostMetrics> { return api(`/api/hosts/${encodeURIComponent(id)}/metrics`); }

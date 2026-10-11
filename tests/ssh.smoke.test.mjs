@@ -58,6 +58,11 @@ test("local OpenSSH SFTP lists, uploads and downloads within the allowed directo
     response = await fetch(`${url}/api/hosts/local/download?path=hello.txt`, { headers: { cookie } });
     assert.equal(response.status, 200);
     assert.equal(await response.text(), "hello world");
+    response = await fetch(`${url}/api/hosts/local/metrics`, { headers: { cookie } });
+    assert.equal(response.status, 200, "Linux monitoring failed");
+    const metrics = await response.json();
+    assert.ok(metrics.cpuPercent >= 0 && metrics.cpuPercent <= 100);
+    assert.ok(metrics.memoryTotal > 0 && metrics.diskTotal > 0);
     await symlink("/etc/passwd", join(filesDir, "escape"));
     response = await fetch(`${url}/api/hosts/local/download?path=escape`, { headers: { cookie } });
     assert.equal(response.status, 403);

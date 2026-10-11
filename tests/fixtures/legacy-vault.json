@@ -1,0 +1,18 @@
+{
+  "producerGitCommit": "4e74e2d",
+  "passphrase": "mein bestehendes Passwort ü! 123",
+  "envelope": {
+    "version": 1,
+    "kdf": {
+      "name": "PBKDF2",
+      "hash": "SHA-256",
+      "iterations": 600000,
+      "salt": "pb8OMKZqua056U9PpPIG2A=="
+    },
+    "cipher": {
+      "name": "AES-GCM",
+      "iv": "8bFTJQhqD8pBmorv",
+      "data": "trk6FnpIhe9jrkV77Gl8ot2QGPzPJkCfrKkxvCHYm90DAUZ6JMR5elt7IT4ho3+zn1UgPer5BOz60QG1Iqay49tdDr86JDXxtneScJfXH30LJBlZLAXceuQnONl3hN+qjjluV+/Y7fEgUjN43mRaA3P7pMBXn0mQ4TyrN5pPgXMWBxqQnl+Uyysu4qUOdx86pnRM0ZpCXWOtDpr2N65nSPNaDrdhgIu6/22jEjvfA0F59yWRFtEZtIOlZ+TvtB27bcBJ5Tpra3z+aFNlgXGa/A62eFtJCoSu31BN"
+    }
+  }
+}

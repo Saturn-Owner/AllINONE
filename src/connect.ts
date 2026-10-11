@@ -1,9 +1,11 @@
 import {
   connectDrive, downloadDriveSnapshot, downloadHostFile, driveConnected, getHostStatus, getHosts,
-  getServerVault, listDriveSnapshots, listHostFiles, putServerVault, serverLogin, serverLogout, serverSession,
+  getHostMetrics, getServerVault, listDriveSnapshots, listHostFiles, putServerVault, serverLogin, serverLogout, serverSession,
   uploadDriveSnapshot, uploadHostFile, type DriveSnapshot, type HostInfo, type RemoteFile
 } from "./remote";
 import type { ViewContext } from "./features";
+import { saveBackup } from "./backups";
+import { renderConflictResolver } from "./sync-conflicts";
 import { decryptVaultWithKey, parseEnvelope, type VaultData, type VaultEnvelope } from "./vault";
 
 export interface ConnectContext extends ViewContext {
@@ -50,6 +52,7 @@ async function setServerBaseline(revision: string | null, envelope: VaultEnvelop
 }
 
 export function clearServerBaseline(): void {
+  syncMessage = "Lokal gespeichert";
   serverRevision = undefined;
   localStorage.removeItem(REVISION_KEY);
   localStorage.removeItem(BASE_KEY);
@@ -150,8 +153,11 @@ export function renderSync(ctx: ConnectContext): void {
       } catch (error) { feedback.textContent = message(error); feedback.className = "message error"; }
     });
     const logout = element("button", "outline-button", "Server abmelden");
-    logout.addEventListener("click", async () => { try { await serverLogout(); serverAuthenticated = false; serverRevision = undefined; ctx.render(); } catch (error) { feedback.textContent = message(error); } });
+    logout.addEventListener("click", async () => { try { await serverLogout(); serverAuthenticated = false; serverRevision = undefined; syncMessage = "Server abgemeldet · lokal gespeichert"; ctx.render(); } catch (error) { feedback.textContent = message(error); } });
     actions.append(push, pull, logout);
+    const resolve = element("button", "outline-button", "Versionen vergleichen / Konflikt lösen");
+    resolve.onclick = () => void renderConflictResolver(ctx, passInput.value, async (revision, envelope) => { await setServerBaseline(revision, envelope); });
+    actions.append(resolve);
     server.append(passLabel, passInput, actions);
   }
   server.append(feedback);
@@ -253,6 +259,27 @@ export function renderServers(ctx: ConnectContext): void {
     });
     panel.append(statusButton);
     if (statusOutput) panel.append(element("pre", "server-output", statusOutput));
+    const monitor = element("section", "monitor"); monitor.append(element("h3", "", "Live-Monitoring"));
+    const metrics = element("div"); monitor.append(metrics); panel.append(monitor);
+    const hostId = selectedHost;
+    let wasWarning = false;
+    const check = async () => {
+      if (!panel.isConnected) return;
+      try {
+        const m = await getHostMetrics(hostId); if (!panel.isConnected) return;
+        metrics.replaceChildren();
+        for (const [label, value] of [["CPU", m.cpuPercent], ["RAM", m.memoryPercent], ["Speicher /", m.diskPercent]] as const) { const row = element("div", "budget-row"); row.append(element("strong", value >= 90 ? "negative" : "", `${label}: ${value.toFixed(1)} %`)); const bar = element("progress"); bar.max = 100; bar.value = value; bar.setAttribute("aria-label", label); row.append(bar); metrics.append(row); }
+        const gib = (bytes: number) => (bytes / 1024 ** 3).toFixed(1);
+        metrics.append(element("p", "hint", `RAM ${gib(m.memoryUsed)} / ${gib(m.memoryTotal)} GiB · Speicher ${gib(m.diskUsed)} / ${gib(m.diskTotal)} GiB · Geprüft ${new Date(m.checkedAt).toLocaleTimeString("de-DE")}`));
+        const warning = m.cpuPercent >= 90 || m.memoryPercent >= 90 || m.diskPercent >= 90;
+        if (warning) metrics.append(element("p", "security-notice", "Hohe Auslastung: Mindestens ein Wert erreicht 90 %."));
+        if (warning && !wasWarning) notifyHost(`${hosts.find((h) => h.id === hostId)?.label || hostId}: hohe Auslastung`); wasWarning = warning;
+      } catch (e) { if (panel.isConnected) { metrics.textContent = `VPS nicht erreichbar oder Monitoring nicht verfügbar: ${message(e)}`; metrics.className = "message error"; if (!wasWarning) notifyHost(`${hostId}: Verbindung fehlgeschlagen`); wasWarning = true; } }
+      if (panel.isConnected) window.setTimeout(check, 60_000);
+    };
+    const notifyHost = (body: string) => { if (ctx.data.preferences?.notifications && "Notification" in window && Notification.permission === "granted") void navigator.serviceWorker.ready.then((r) => r.showNotification("AllINONE · VPS", { body, tag: `vps-${hostId}` })).catch(() => undefined); };
+    window.setTimeout(check, 0);
+    monitor.append(element("p", "hint", "Aktualisiert jede Minute, solange diese VPS-Ansicht geöffnet und entsperrt ist. Linux-Hosts erforderlich. Verbindungen sind serverseitig gespeichert."));
     const pathLabel = element("label", "", "Pfad innerhalb des freigegebenen Verzeichnisses");
     pathLabel.htmlFor = "server-path";
     const pathInput = element("input") as HTMLInputElement;
@@ -291,4 +318,8 @@ export function renderServers(ctx: ConnectContext): void {
     uploadLabel.append(uploadInput); panel.append(uploadLabel);
   }
   panel.append(feedback); content.append(panel);
+}
+
+export function getSyncStatus(): string {
+  return syncMessage || (serverAuthenticated ? "Server verbunden · noch nicht gekoppelt" : "Lokal gespeichert");
 }

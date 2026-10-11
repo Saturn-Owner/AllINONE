@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { handleAI } from "./ai.mjs";
 import { verifyPassword } from "./auth.mjs";
 import { handleHostRequest, loadHosts } from "./ssh.mjs";
 
@@ -43,11 +44,11 @@ async function serveStatic(req, res, distDir, path) {
   try { name = decodeURIComponent(path); } catch { return json(res, 400, { error: "Ungültiger Pfad." }); }
   const target = resolve(distDir, `.${name === "/" ? "/index.html" : name}`);
   if (target !== resolve(distDir) && !target.startsWith(`${resolve(distDir)}${sep}`)) return json(res, 403, { error: "Verboten." });
-  const known = [".html", ".js", ".css", ".png", ".webmanifest", ".svg", ".ico"];
+  const known = [".html", ".js", ".css", ".png", ".webmanifest", ".svg", ".ico", ".zip"];
   if (!known.includes(extname(target))) return json(res, 404, { error: "Nicht gefunden." });
   try {
     const data = await readFile(target);
-    const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".png": "image/png", ".webmanifest": "application/manifest+json", ".svg": "image/svg+xml", ".ico": "image/x-icon" };
+    const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".png": "image/png", ".webmanifest": "application/manifest+json", ".svg": "image/svg+xml", ".ico": "image/x-icon", ".zip": "application/zip" };
     res.writeHead(200, { "content-type": `${types[extname(target)]}; charset=utf-8`, "content-length": data.length, "cache-control": extname(target) === ".html" ? "no-cache" : "public, max-age=3600" });
     res.end(req.method === "HEAD" ? undefined : data);
   } catch { json(res, 404, { error: "Nicht gefunden." }); }
@@ -138,6 +139,7 @@ export function createApp(config) {
         });
         return result.conflict ? json(res, 409, { error: "Synchronisationskonflikt.", revision: result.revision }) : json(res, 200, result);
       }
+      if (url.pathname === "/api/ai" && req.method === "POST") return json(res, 200, await handleAI(await bodyJson(req, 420000), config.ai));
       if (url.pathname.startsWith("/api/hosts")) return await handleHostRequest(req, res, url, config.hosts || [], bodyBuffer, json);
       return json(res, 404, { error: "Nicht gefunden." });
     } catch (error) {
@@ -152,7 +154,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const hosts = await loadHosts(process.env.HOSTS_FILE);
     const server = createApp({
       publicOrigin: process.env.PUBLIC_ORIGIN || "", passwordHash: process.env.APP_PASSWORD_HASH,
-      dataDir: process.env.DATA_DIR || resolve(baseDir, "data"), distDir: resolve(baseDir, "dist"), hosts
+      dataDir: process.env.DATA_DIR || resolve(baseDir, "data"), distDir: resolve(baseDir, "dist"), hosts, ai: { url: process.env.AIO_OLLAMA_URL, model: process.env.AIO_OLLAMA_MODEL }
     });
     const port = Number(process.env.PORT || 4174);
     server.listen(port, "0.0.0.0", () => process.stdout.write(`AllINONE server ready on port ${port}\n`));

@@ -77,25 +77,42 @@ async function allowedPath(sftp, host, relative, forCreate = false) {
   return candidate;
 }
 
-async function status(client) {
-  const command = "hostname; uptime -p; df -h /; free -m";
+async function execBounded(client, command) {
   return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { client.end(); reject(new Error("Status-Zeitlimit überschritten.")); }, 15000);
     client.exec(command, (error, stream) => {
-      if (error) return reject(error);
+      if (error) { clearTimeout(timer); return reject(error); }
       let output = "";
-      stream.on("data", (chunk) => { output += chunk.toString(); if (output.length > 32768) stream.close(); });
-      stream.stderr.on("data", (chunk) => { output += chunk.toString(); });
-      stream.on("close", (code) => code === 0 ? resolve(output.slice(0, 32768)) : reject(new Error(`Statusbefehl fehlgeschlagen: ${code}`)));
-      stream.on("error", reject);
+      stream.on("data", (chunk) => { output += chunk.toString(); if (output.length > 32768) { clearTimeout(timer); stream.close(); reject(new Error("Statusausgabe zu groß.")); } });
+      stream.stderr.on("data", () => {});
+      stream.on("close", (code) => { clearTimeout(timer); code === 0 ? resolve(output) : reject(new Error(`Statusbefehl fehlgeschlagen: ${code}`)); });
+      stream.on("error", (error) => { clearTimeout(timer); reject(error); });
     });
   });
+}
+async function status(client) { return execBounded(client, "hostname; uptime -p; df -h /; free -m"); }
+export function parseMetrics(output) {
+  const lines = output.trim().split("\n");
+  const cpu = lines.filter((line) => line.startsWith("cpu ")).map((line) => line.trim().split(/\s+/).slice(1, 9).map(Number));
+  const memory = /^MEM (\d+) (\d+)$/m.exec(output); const disk = /^DISK (\d+) (\d+)$/m.exec(output);
+  if (cpu.length !== 2 || cpu.some((c) => c.length < 4 || c.some((v) => !Number.isFinite(v))) || !memory || !disk) throw new Error("Metriken nicht verfügbar (Linux /proc, awk und df erforderlich).");
+  const total = (c) => c.reduce((a, b) => a + b, 0);
+  const delta = total(cpu[1]) - total(cpu[0]); const idle = cpu[1][3] + (cpu[1][4] || 0) - cpu[0][3] - (cpu[0][4] || 0);
+  const memoryTotal = Number(memory[1]) * 1024, memoryUsed = (Number(memory[1]) - Number(memory[2])) * 1024;
+  const diskTotal = Number(disk[1]) * 1024, diskUsed = Number(disk[2]) * 1024;
+  if (delta <= 0 || memoryTotal <= 0 || diskTotal <= 0) throw new Error("Ungültige Metriken.");
+  return { cpuPercent: Math.max(0, Math.min(100, (1 - idle / delta) * 100)), memoryTotal, memoryUsed, memoryPercent: memoryUsed / memoryTotal * 100, diskTotal, diskUsed, diskPercent: diskUsed / diskTotal * 100, checkedAt: new Date().toISOString() };
+}
+async function metrics(client) {
+  const command = `LC_ALL=C; export LC_ALL; head -n 1 /proc/stat; sleep 1; head -n 1 /proc/stat; awk '/MemTotal:/ {t=$2} /MemAvailable:/ {a=$2} END {print "MEM " t " " a}' /proc/meminfo; df -Pk / | awk 'NR==2 {print "DISK " $2 " " $3}'`;
+  return parseMetrics(await execBounded(client, command));
 }
 
 export async function handleHostRequest(req, res, url, hosts, bodyBuffer, json) {
   if (url.pathname === "/api/hosts" && req.method === "GET") {
     return json(res, 200, hosts.map(({ id, label }) => ({ id, label })));
   }
-  const match = /^\/api\/hosts\/([a-z0-9_-]+)\/(status|files|download|upload)$/.exec(url.pathname);
+  const match = /^\/api\/hosts\/([a-z0-9_-]+)\/(status|metrics|files|download|upload)$/.exec(url.pathname);
   if (!match) return json(res, 404, { error: "Nicht gefunden." });
   const host = hosts.find((item) => item.id === match[1]);
   if (!host) return json(res, 404, { error: "Host nicht gefunden." });
@@ -107,6 +124,7 @@ export async function handleHostRequest(req, res, url, hosts, bodyBuffer, json) 
   try {
     const result = await withClient(host, async (client) => {
       if (action === "status") return { output: await status(client) };
+      if (action === "metrics") return await metrics(client);
       const sftp = await getSftp(client);
       const relative = url.searchParams.get("path") || "";
       if (action === "files") {

@@ -7,6 +7,12 @@ export interface Task {
   priority: Priority;
   due: string | null;
   createdAt: string;
+  status?: "offen" | "in-arbeit" | "erledigt";
+  subtasks?: { id: string; title: string; done: boolean }[];
+  repeatDay?: number;
+  repeat?: "keine" | "täglich" | "wöchentlich" | "monatlich";
+  reminderAt?: string;
+  successorId?: string;
 }
 
 export interface Note {
@@ -14,6 +20,10 @@ export interface Note {
   title: string;
   body: string;
   updatedAt: string;
+  folder?: string;
+  tags?: string[];
+  attachments?: { id: string; name: string; mime: string; base64: string }[];
+  history?: { title: string; body: string; updatedAt: string }[];
 }
 
 export interface PasswordEntry {
@@ -53,16 +63,31 @@ export interface RecurringPayment {
   payee: string;
   active: boolean;
   updatedAt: string;
+  subscription?: boolean;
+  cancelBy?: string;
+  website?: string;
 }
 
+export interface Preferences {
+  lockMinutes: number;
+  widgets: string[];
+  notifications: boolean;
+}
+
+export const DEFAULT_PREFERENCES: Preferences = {
+  lockMinutes: 15, widgets: ["tasks", "notes", "payments"], notifications: false
+};
+
 export interface VaultData {
-  version: 2;
+  version: 3;
   tasks: Task[];
   notes: Note[];
   passwords: PasswordEntry[];
   accounts: Account[];
   transactions: Transaction[];
   recurring: RecurringPayment[];
+  budgets?: { id: string; month: string; category: string; amountCents: number }[];
+  preferences?: Preferences;
 }
 
 export interface VaultEnvelope {
@@ -113,15 +138,15 @@ async function deriveKey(passphrase: string, salt: Uint8Array): Promise<CryptoKe
 export function normalizeData(value: unknown): VaultData {
   if (!value || typeof value !== "object") throw new Error("Unbekanntes Tresorformat.");
   const data = value as Partial<Omit<VaultData, "version">> & { version?: number };
-  const validBase = (data.version === 1 || data.version === 2) && Array.isArray(data.tasks) && Array.isArray(data.notes)
-    && data.tasks.every((task) => typeof task.id === "string" && typeof task.title === "string"
+  const validBase = ([1, 2, 3].includes(data.version || 0)) && Array.isArray(data.tasks) && Array.isArray(data.notes)
+    && data.tasks.every((task) => typeof task?.id === "string" && typeof task.title === "string"
       && typeof task.done === "boolean" && ["niedrig", "mittel", "hoch"].includes(task.priority)
       && (task.due === null || typeof task.due === "string") && typeof task.createdAt === "string")
-    && data.notes.every((note) => typeof note.id === "string" && typeof note.title === "string"
+    && data.notes.every((note) => typeof note?.id === "string" && typeof note.title === "string"
       && typeof note.body === "string" && typeof note.updatedAt === "string");
   if (!validBase) throw new Error("Unbekanntes Tresorformat.");
   const arrays = [data.passwords, data.accounts, data.transactions, data.recurring];
-  if (data.version === 2 && arrays.some((items) => !Array.isArray(items))) throw new Error("Unbekanntes Tresorformat.");
+  if (data.version !== 1 && arrays.some((items) => !Array.isArray(items))) throw new Error("Unbekanntes Tresorformat.");
   const passwords = data.passwords || [];
   const accounts = data.accounts || [];
   const transactions = data.transactions || [];
@@ -141,7 +166,31 @@ export function normalizeData(value: unknown): VaultData {
       && typeof item.payee === "string" && typeof item.active === "boolean" && typeof item.updatedAt === "string")) {
     throw new Error("Unbekanntes Tresorformat.");
   }
-  return { version: 2, tasks: data.tasks!, notes: data.notes!, passwords, accounts, transactions, recurring };
+  const invalid = () => { throw new Error("Unbekanntes Tresorformat."); };
+  for (const task of data.tasks!) {
+    if (task.status !== undefined && !["offen", "in-arbeit", "erledigt"].includes(task.status)) invalid();
+    if (task.repeat !== undefined && !["keine", "täglich", "wöchentlich", "monatlich"].includes(task.repeat)) invalid();
+    if (task.repeatDay !== undefined && (!Number.isInteger(task.repeatDay) || task.repeatDay < 1 || task.repeatDay > 31)) invalid();
+    if (task.reminderAt !== undefined && typeof task.reminderAt !== "string") invalid();
+    if (task.successorId !== undefined && typeof task.successorId !== "string") invalid();
+    if (task.subtasks !== undefined && (!Array.isArray(task.subtasks) || !task.subtasks.every((s) => typeof s?.id === "string" && typeof s.title === "string" && typeof s.done === "boolean"))) invalid();
+  }
+  for (const note of data.notes!) {
+    if (note.folder !== undefined && typeof note.folder !== "string") invalid();
+    if (note.tags !== undefined && (!Array.isArray(note.tags) || !note.tags.every((tag) => typeof tag === "string"))) invalid();
+    if (note.history !== undefined && (!Array.isArray(note.history) || note.history.length > 20 || !note.history.every((h) => typeof h?.title === "string" && typeof h.body === "string" && typeof h.updatedAt === "string"))) invalid();
+    if (note.attachments !== undefined && (!Array.isArray(note.attachments) || !note.attachments.every((a) => typeof a?.id === "string" && typeof a.name === "string" && typeof a.mime === "string" && typeof a.base64 === "string" && /^[A-Za-z0-9+/]*={0,2}$/.test(a.base64) && a.base64.length <= 2_800_000))) invalid();
+  }
+  for (const payment of recurring) {
+    if (payment.subscription !== undefined && typeof payment.subscription !== "boolean") invalid();
+    if (payment.cancelBy !== undefined && typeof payment.cancelBy !== "string") invalid();
+    if (payment.website !== undefined && typeof payment.website !== "string") invalid();
+  }
+  if (data.budgets !== undefined && (!Array.isArray(data.budgets) || !data.budgets.every((b) => typeof b?.id === "string" && /^\d{4}-\d{2}$/.test(b.month) && typeof b.category === "string" && Number.isSafeInteger(b.amountCents) && b.amountCents >= 0))) invalid();
+  if (data.preferences !== undefined && (!Number.isInteger(data.preferences?.lockMinutes) || data.preferences.lockMinutes < 1 || data.preferences.lockMinutes > 120 || typeof data.preferences.notifications !== "boolean" || !Array.isArray(data.preferences.widgets) || new Set(data.preferences.widgets).size !== data.preferences.widgets.length || !data.preferences.widgets.every((w) => ["tasks", "notes", "payments"].includes(w)))) invalid();
+  return { version: 3, tasks: data.tasks!, notes: data.notes!, passwords, accounts, transactions, recurring,
+    ...(data.budgets !== undefined ? { budgets: data.budgets } : {}),
+    ...(data.preferences !== undefined ? { preferences: data.preferences } : {}) };
 }
 
 export function parseEnvelope(raw: string): VaultEnvelope {
@@ -163,10 +212,10 @@ export function parseEnvelope(raw: string): VaultEnvelope {
 }
 
 export async function encryptVault(data: VaultData, key: CryptoKey, salt: string): Promise<VaultEnvelope> {
-  normalizeData(data);
+  const checked = normalizeData(data);
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ciphertext = new Uint8Array(await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv }, key, new TextEncoder().encode(JSON.stringify(data))
+    { name: "AES-GCM", iv }, key, new TextEncoder().encode(JSON.stringify(checked))
   ));
   return {
     version: 1,
@@ -179,7 +228,7 @@ export async function createVault(passphrase: string): Promise<{ data: VaultData
   if (passphrase.length < 14) throw new Error("Wähle mindestens 14 Zeichen für die Tresor-Passphrase.");
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const key = await deriveKey(passphrase, salt);
-  const data: VaultData = { version: 2, tasks: [], notes: [], passwords: [], accounts: [], transactions: [], recurring: [] };
+  const data: VaultData = { version: 3, tasks: [], notes: [], passwords: [], accounts: [], transactions: [], recurring: [] };
   const envelope = await encryptVault(data, key, toBase64(salt));
   return { data, key, envelope };
 }

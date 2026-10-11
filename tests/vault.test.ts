@@ -29,7 +29,7 @@ test("invalid backup formats are rejected", async () => {
 
 test("old task and note vaults migrate without losing content", () => {
   const migrated = normalizeData({ version: 1, tasks: [], notes: [{ id: "n", title: "Alt", body: "Inhalt", updatedAt: "2026-10-11" }] });
-  assert.equal(migrated.version, 2);
+  assert.equal(migrated.version, 3);
   assert.equal(migrated.notes[0].body, "Inhalt");
   assert.deepEqual(migrated.passwords, []);
   assert.deepEqual(migrated.transactions, []);

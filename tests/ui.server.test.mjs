@@ -86,6 +86,17 @@ test("browser profiles sync encrypted vaults automatically and reject stale uplo
     await page.getByRole("button", { name: "Verschlüsselten Tresor hochladen" }).click();
     await page.getByText("Synchronisationskonflikt.").waitFor();
     assert.equal((await page.getByText("Synchronisationskonflikt.").count()), 1);
+    await page.locator("#remote-passphrase").fill("erste lange Tresor-Passphrase");
+    await page.getByRole("button", { name: "Versionen vergleichen / Konflikt lösen" }).click();
+    await page.getByRole("heading", { name: "Synchronisationskonflikt lösen" }).waitFor();
+    await page.getByRole("button", { name: "Auswahl zusammenführen & synchronisieren" }).click();
+    await page.waitForFunction((previous) => localStorage.getItem("allinone.serverRevision.v1") !== previous && Boolean(localStorage.getItem("allinone.serverRevision.v1")), oldRevision);
+    await page.locator('[data-tab="dashboard"]').click();
+    await page.getByText("Auf Gerät zwei").waitFor();
+    await page.getByText("Veraltete Änderung").waitFor();
+    await observer.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await observer.locator('[data-tab="dashboard"]').click();
+    await observer.getByText("Veraltete Änderung").waitFor();
   } finally {
     await browser?.close();
     await new Promise((resolve) => server.close(resolve));

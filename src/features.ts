@@ -1,5 +1,6 @@
 import { balance, formatEuro, generatePassword, monthTotals, nextRecurringDate, parseEuro } from "./domain";
 import type { RecurringPayment, VaultData } from "./vault";
+import { validDate, localDate, reusedPasswords } from "./productivity";
 
 export interface ViewContext {
   content: HTMLElement;
@@ -22,6 +23,8 @@ export function renderPasswords(ctx: ViewContext): void {
   content.append(heading("PASSWORTTRESOR", "Zugänge", "Zugangsdaten im verschlüsselten lokalen Tresor verwalten."));
   const notice = element("p", "security-notice", "Noch nicht unabhängig geprüft. Bitte keine wichtigen Konten hierher migrieren, bevor ein Security Review abgeschlossen ist.");
   content.append(notice);
+  const reused = reusedPasswords(data);
+  content.append(element("p", reused.size ? "security-notice" : "positive", reused.size ? `${reused.size} Zugänge verwenden ein mehrfach gespeichertes Passwort. Ersetze diese durch unterschiedliche Passwörter.` : "Keine mehrfach verwendeten Passwörter im Tresor erkannt."));
   const current = data.passwords.find((item) => item.id === editingPassword);
   const editor = element("section", "panel");
   editor.innerHTML = `<h2>${current ? "Zugang bearbeiten" : "Neuen Zugang speichern"}</h2>
@@ -89,6 +92,7 @@ function renderPasswordRows(ctx: ViewContext, rows: HTMLElement): void {
   rows.replaceChildren();
   const filtered = ctx.data.passwords.filter((item) => `${item.title} ${item.username}`.toLocaleLowerCase().includes(passwordSearch.toLocaleLowerCase()));
   if (!filtered.length) rows.append(ctx.element("p", "empty", "Keine passenden Zugänge."));
+  const reused = reusedPasswords(ctx.data);
   for (const item of filtered) {
     const row = ctx.element("div", "credential-row");
     const info = ctx.element("div", "credential-info");
@@ -123,6 +127,7 @@ function renderPasswordRows(ctx: ViewContext, rows: HTMLElement): void {
           .catch((error) => window.alert(errorMessage(error)));
       }
     });
+    if (reused.has(item.id)) info.append(ctx.element("small", "negative", "Passwort mehrfach verwendet"));
     row.append(info, secret, show, copy, edit, remove);
     rows.append(row);
   }
@@ -131,7 +136,7 @@ function renderPasswordRows(ctx: ViewContext, rows: HTMLElement): void {
 export function renderFinances(ctx: ViewContext): void {
   const { content, data, element, heading } = ctx;
   content.append(heading("FINANZEN", "Dein Geld im Blick.", "Konten, Buchungen und wiederkehrende Zahlungen manuell erfassen."));
-  const month = new Date().toISOString().slice(0, 7);
+  const month = localDate().slice(0, 7);
   const totals = monthTotals(data.transactions, month);
   const summary = element("div", "stats");
   for (const [amount, label] of [
@@ -182,7 +187,7 @@ export function renderFinances(ctx: ViewContext): void {
   txPanel.innerHTML = '<h2>Neue Buchung</h2><form id="transaction-form"><div class="form-pair"><div><label for="tx-account">Konto</label><select id="tx-account"></select></div><div><label for="tx-kind">Art</label><select id="tx-kind"><option value="expense">Ausgabe</option><option value="income">Einnahme</option></select></div></div><div class="form-pair"><div><label for="tx-amount">Betrag in €</label><input id="tx-amount" inputmode="decimal" required placeholder="12,50" /></div><div><label for="tx-date">Datum</label><input id="tx-date" type="date" required /></div></div><div class="form-pair"><div><label for="tx-payee">Empfänger / Quelle</label><input id="tx-payee" maxlength="160" required /></div><div><label for="tx-category">Kategorie</label><input id="tx-category" maxlength="80" placeholder="z. B. Lebensmittel" /></div></div><label for="tx-note">Notiz</label><input id="tx-note" maxlength="500" /><button class="primary form-submit" type="submit">Buchung speichern</button></form>';
   const accountSelect = txPanel.querySelector<HTMLSelectElement>("#tx-account")!;
   for (const account of data.accounts) accountSelect.add(new Option(account.name, account.id));
-  txPanel.querySelector<HTMLInputElement>("#tx-date")!.value = new Date().toISOString().slice(0, 10);
+  txPanel.querySelector<HTMLInputElement>("#tx-date")!.value = localDate();
   txPanel.querySelector<HTMLFormElement>("form")!.addEventListener("submit", async (event) => {
     event.preventDefault();
     try {
@@ -218,7 +223,7 @@ export function renderFinances(ctx: ViewContext): void {
   content.append(txList);
 
   const recurringPanel = element("section", "panel");
-  recurringPanel.innerHTML = '<h2>Wiederkehrende Zahlungen</h2><form id="recurring-form"><div class="form-pair"><div><label for="rec-account">Konto</label><select id="rec-account"></select></div><div><label for="rec-payee">Empfänger</label><input id="rec-payee" maxlength="160" required /></div></div><div class="form-pair"><div><label for="rec-amount">Monatlicher Betrag in €</label><input id="rec-amount" inputmode="decimal" required /></div><div><label for="rec-day">Tag im Monat (1–31)</label><input id="rec-day" type="number" min="1" max="31" value="1" required /></div></div><label for="rec-category">Kategorie</label><input id="rec-category" maxlength="80" /><button class="primary form-submit" type="submit">Zahlung vormerken</button></form>';
+  recurringPanel.innerHTML = '<h2>Wiederkehrende Zahlungen</h2><form id="recurring-form"><div class="form-pair"><div><label for="rec-account">Konto</label><select id="rec-account"></select></div><div><label for="rec-payee">Empfänger</label><input id="rec-payee" maxlength="160" required /></div></div><div class="form-pair"><div><label for="rec-amount">Monatlicher Betrag in €</label><input id="rec-amount" inputmode="decimal" required /></div><div><label for="rec-day">Tag im Monat (1–31)</label><input id="rec-day" type="number" min="1" max="31" value="1" required /></div></div><label for="rec-category">Kategorie</label><input id="rec-category" maxlength="80" /><label class="subtask"><input id="rec-subscription" type="checkbox" /> Als Abo verwalten</label><label for="rec-cancel">Kündigen bis</label><input id="rec-cancel" type="date" /><button class="primary form-submit" type="submit">Zahlung vormerken</button></form>';
   const recurringAccount = recurringPanel.querySelector<HTMLSelectElement>("#rec-account")!;
   for (const account of data.accounts) recurringAccount.add(new Option(account.name, account.id));
   recurringPanel.querySelector<HTMLFormElement>("form")!.addEventListener("submit", async (event) => {
@@ -230,7 +235,7 @@ export function renderFinances(ctx: ViewContext): void {
         amountCents: amount, dayOfMonth: Number(recurringPanel.querySelector<HTMLInputElement>("#rec-day")!.value),
         payee: recurringPanel.querySelector<HTMLInputElement>("#rec-payee")!.value.trim(),
         category: recurringPanel.querySelector<HTMLInputElement>("#rec-category")!.value.trim(),
-        active: true, updatedAt: new Date().toISOString() }));
+        active: true, subscription: recurringPanel.querySelector<HTMLInputElement>("#rec-subscription")!.checked, cancelBy: recurringPanel.querySelector<HTMLInputElement>("#rec-cancel")!.value, updatedAt: new Date().toISOString() }));
     } catch (error) { window.alert(errorMessage(error)); }
   });
   for (const payment of data.recurring) renderRecurringRow(ctx, recurringPanel, payment);
@@ -242,11 +247,16 @@ function renderRecurringRow(ctx: ViewContext, panel: HTMLElement, payment: Recur
   const row = ctx.element("div", "finance-row");
   const info = ctx.element("div", "credential-info");
   info.append(ctx.element("strong", "", payment.payee), ctx.element("small", "", `Nächster Termin: ${nextRecurringDate(payment)} · ${ctx.data.accounts.find((account) => account.id === payment.accountId)?.name || "Konto fehlt"}`));
-  row.append(info, ctx.element("span", "negative", `−${formatEuro(payment.amountCents)}`));
+  row.append(info, ctx.element("span", "negative", `−${formatEuro(payment.amountCents)}${payment.active ? "" : " · pausiert"}`));
+  const toggle = ctx.element("button", "outline-button", payment.active ? "Pausieren" : "Aktivieren"); toggle.onclick = () => void ctx.changeData((d) => { const p = d.recurring.find((r) => r.id === payment.id); if (p) p.active = !p.active; }).catch((e) => window.alert(errorMessage(e))); row.append(toggle);
+  const edit = ctx.element("button", "text-button", "Frist ändern"); edit.onclick = () => { const date = window.prompt("Kündigungsfrist (JJJJ-MM-TT, leer zum Entfernen)", payment.cancelBy || ""); if (date === null) return; if (date && !validDate(date)) return window.alert("Datum im Format JJJJ-MM-TT eingeben."); void ctx.changeData((d) => { const p = d.recurring.find((r) => r.id === payment.id); if (p) p.cancelBy = date; }).catch((e) => window.alert(errorMessage(e))); }; row.append(edit);
   const remove = ctx.element("button", "text-button danger", "Löschen");
   remove.addEventListener("click", () => {
     if (window.confirm(`Zahlung „${payment.payee}“ löschen?`)) ctx.changeData((data) => { data.recurring = data.recurring.filter((item) => item.id !== payment.id); }).catch((error) => window.alert(errorMessage(error)));
   });
+  const subscription = ctx.element("button", "text-button", payment.subscription ? "Abo-Markierung entfernen" : "Als Abo markieren"); subscription.onclick = () => void ctx.changeData((d) => { const p = d.recurring.find((r) => r.id === payment.id); if (p) p.subscription = !p.subscription; }).catch((e) => window.alert(errorMessage(e))); row.append(subscription);
   row.append(remove);
   panel.append(row);
 }
+
+export function openPassword(id: string): void { editingPassword = id; passwordSearch = ""; }
