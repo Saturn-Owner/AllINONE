@@ -55,7 +55,7 @@ Dies ist eine interne Codeprüfung mit reproduzierbaren Funktionsprüfungen, kei
 - OpenSSH-SFTP wird gegen einen temporären lokalen SSH-Server geprüft, einschließlich Größenlimit, erlaubten und verbotenen Symlinks sowie Traversal.
 - Build-Fingerprint und Cache-Aufräumen werden separat geprüft; ein Build in einer westlichen Zeitzone wurde ausgeführt.
 - `npm audit` meldete für Produktions- und Entwicklungsabhängigkeiten keine bekannten Schwachstellen.
-- Linux-Paket: SHA-256, Paketgröße, Entpacken, installierter Build-Fingerprint und enthaltenes Erweiterungspaket geprüft. Der echte GitHub-Abruf wird nach dem Veröffentlichen zusätzlich ausgeführt.
+- Linux-Paket: SHA-256, Paketgröße, Entpacken, installierter Build-Fingerprint und enthaltenes Erweiterungspaket geprüft. Der echte GitHub-Abruf wurde erfolgreich geprüft: Update von 0.2.0 auf 0.2.1, Erkennung des aktuellen Stands, Reparatur einer gelöschten App-Datei und Erhaltung einer eigenen Datei.
 
 ## Grenzen
 
