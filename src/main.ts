@@ -3,9 +3,9 @@ import {
   DEFAULT_PREFERENCES, createVault, encryptVault, parseEnvelope, unlockVault,
   type Note, type Priority, type Task, type VaultData, type VaultEnvelope
 } from "./vault";
-import { balance, formatEuro } from "./domain";
+import { balance, formatEuro, sumCents } from "./domain";
 import { wikiLinks } from "./domain";
-import { openPassword, renderFinances, renderPasswords, type ViewContext } from "./features";
+import { openFinanceEntry, openPassword, renderFinances, renderPasswords, type ViewContext } from "./features";
 import { clearServerBaseline, getSyncStatus, pollServerSync, renderServers, renderSync, scheduleServerSync, type ConnectContext } from "./connect";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
@@ -18,58 +18,72 @@ import { backupError, saveBackup } from "./backups";
 import { completeTask, downloadFile } from "./productivity";
 import { addGlobalSearch, dashboardTools, renderSettings, checkReminders, captureSharedLink } from "./workspace-extras";
 import { renderAI } from "./ai";
+import { assertVaultEpoch, invalidateVault, vaultEpoch, vaultSignal } from "./lifecycle";
+import { STORAGE_KEY, assertStoredVault, withVaultLock } from "./storage";
+import { captureDrafts, restoreDrafts, hasDrafts, clearDrafts, currentSubmission, clearFormDraft } from "./drafts";
+import { openTask, resetTaskEditor } from "./tasks";
+import { resetPasswordEditor } from "./features";
 
 
-const STORAGE_KEY = "allinone.vault.v1";
 const app = document.querySelector<HTMLDivElement>("#app")!;
 type Tab = "dashboard" | "tasks" | "notes" | "passwords" | "finances" | "servers" | "sync" | "settings" | "ai";
 
+let viewController = new AbortController();
 let session: { data: VaultData; key: CryptoKey; envelope: VaultEnvelope } | null = null;
 let tab: Tab = "dashboard";
 let editingNote: string | null = null;
 let lastActivity = Date.now();
 let changeQueue = Promise.resolve();
 let pendingChanges = 0;
-let draftDirty = false;
+
 window.addEventListener("keydown", (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
     const search = document.querySelector<HTMLInputElement>('.global-search input');
     if (search) { event.preventDefault(); search.focus(); }
   }
 });
-document.addEventListener("input", (event) => { if ((event.target as HTMLElement).closest("form")) draftDirty = true; });
+
 
 for (const eventName of ["pointerdown", "keydown"]) {
   window.addEventListener(eventName, () => { lastActivity = Date.now(); }, { passive: true });
 }
 window.setInterval(() => {
   if (session && Date.now() - lastActivity > (session.data.preferences || DEFAULT_PREFERENCES).lockMinutes * 60 * 1000) {
-    session = null;
-    tab = "dashboard";
-    render();
+    lockVault();
   }
 }, 30_000);
 
+function lockVault(): void {
+  invalidateVault();
+  session = null;
+  editingNote = null;
+  resetTaskEditor(); resetPasswordEditor(); clearDrafts();
+  tab = "dashboard";
+  render();
+}
 function pollNow(): void {
   const active = session;
-  if (!active || pendingChanges || draftDirty) return;
-  void pollServerSync(active.envelope, active.key, (envelope, data) => {
-    if (!session || session.envelope.cipher.data !== active.envelope.cipher.data) return false;
-    void saveBackup(JSON.stringify(active.envelope)).catch(() => undefined);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
-    void saveBackup(JSON.stringify(envelope)).catch(() => undefined);
-    session = { ...session, data, envelope };
-    render();
-    return true;
+  if (!active || pendingChanges || hasDrafts()) return;
+  void pollServerSync(active.envelope, active.key, async (envelope, data) => {
+    return withVaultLock(async () => {
+      if (session !== active || pendingChanges || hasDrafts()) return false;
+      const raw = JSON.stringify(active.envelope);
+      assertStoredVault(raw);
+      await saveBackup(raw);
+      if (session !== active || pendingChanges || hasDrafts()) return false;
+      assertStoredVault(raw);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
+      void saveBackup(JSON.stringify(envelope)).catch(() => undefined);
+      session = { ...active, data, envelope }; render(); return true;
+    });
   });
 }
 
 window.setInterval(pollNow, 30_000);
 window.addEventListener("focus", pollNow);
 window.addEventListener("storage", (event) => {
-  if (event.key === STORAGE_KEY && session && event.newValue !== JSON.stringify(session.envelope)) {
-    session = null;
-    render();
+  if (event.key === STORAGE_KEY && (!session || event.newValue !== JSON.stringify(session.envelope))) {
+    lockVault();
   }
 });
 
@@ -92,25 +106,28 @@ function storedEnvelope(): VaultEnvelope | null {
   return raw ? parseEnvelope(raw) : null;
 }
 
-async function changeData(update: (data: VaultData) => void): Promise<void> {
+async function changeData(update: (data: VaultData) => void, expectedEpoch = vaultEpoch()): Promise<void> {
+  const form = currentSubmission();
+  if (form) { form.inert = true; form.setAttribute("aria-busy", "true"); }
   pendingChanges++;
-  const pending = changeQueue.then(async () => {
+  const pending = changeQueue.then(() => withVaultLock(async () => {
+    assertVaultEpoch(expectedEpoch);
     const active = session;
     if (!active) throw new Error("Tresor ist gesperrt. Bitte erneut entsperren.");
-    const next = structuredClone(active.data);
-    update(next);
+    const raw = JSON.stringify(active.envelope);
+    assertStoredVault(raw);
+    const next = structuredClone(active.data); update(next);
     const envelope = await encryptVault(next, active.key, active.envelope.kdf.salt);
-    if (session !== active) throw new Error("Der Tresor wurde zwischenzeitlich gesperrt oder geändert. Bitte erneut versuchen.");
-    await saveBackup(JSON.stringify(active.envelope)).catch(() => undefined);
-    if (session !== active) throw new Error("Der Tresor wurde zwischenzeitlich gesperrt oder geändert. Bitte erneut versuchen.");
+    await saveBackup(raw).catch(() => undefined);
+    assertVaultEpoch(expectedEpoch); assertStoredVault(raw);
+    if (session !== active) throw new Error("Der Tresor wurde zwischenzeitlich geändert. Bitte erneut versuchen.");
     localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
     void saveBackup(JSON.stringify(envelope)).catch(() => undefined);
     session = { ...active, data: next, envelope };
-    render();
-    scheduleServerSync();
-  });
+    clearFormDraft(form); render(); scheduleServerSync();
+  }));
   changeQueue = pending.catch(() => undefined);
-  try { await pending; } finally { pendingChanges--; }
+  try { await pending; } finally { pendingChanges--; if (form) { form.inert = false; form.removeAttribute("aria-busy"); } }
 }
 
 function renderGate(): void {
@@ -146,12 +163,18 @@ ${hasVault ? '<button id="locked-backup" class="outline-button full" type="butto
       </div>
     </main>`;
 
+  if (!window.isSecureContext || !crypto.subtle || !navigator.locks) {
+    announce("Für den verschlüsselten Tresor sind HTTPS (oder localhost) und ein aktueller Browser erforderlich.", true);
+    document.querySelector<HTMLButtonElement>("#vault-form button")!.disabled = true;
+  }
   document.querySelector("#locked-backup")?.addEventListener("click", () => { const raw = localStorage.getItem(STORAGE_KEY); if (raw) downloadFile(`allinone-sicherung-${new Date().toISOString().slice(0, 10)}.json`, raw); });
 
   document.querySelector<HTMLFormElement>("#vault-form")!.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (gateBusy) return;
     const passphrase = document.querySelector<HTMLInputElement>("#passphrase")!.value;
+    const expectedEpoch = vaultEpoch();
+    const expectedRaw = localStorage.getItem(STORAGE_KEY);
     const button = document.querySelector<HTMLButtonElement>("#vault-form button")!;
     const form = document.querySelector<HTMLFormElement>("#vault-form")!;
     const originalLabel = button.innerHTML;
@@ -162,18 +185,17 @@ ${hasVault ? '<button id="locked-backup" class="outline-button full" type="butto
     form.setAttribute("aria-busy", "true");
     announce("");
     try {
+      if ((expectedRaw !== null) !== hasVault) throw new Error("Tresor geändert. Bitte die Seite neu laden.");
       if (hasVault) {
         const envelope = storedEnvelope()!;
         const { data, key } = await unlockVault(envelope, passphrase);
-        session = { data, key, envelope };
+        await withVaultLock(() => { assertVaultEpoch(expectedEpoch); assertStoredVault(expectedRaw); session = { data, key, envelope }; });
       } else {
         if (passphrase !== document.querySelector<HTMLInputElement>("#confirm")!.value) {
           throw new Error("Die Passphrasen stimmen nicht überein.");
         }
         const created = await createVault(passphrase);
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(created.envelope));
-        clearServerBaseline();
-        session = created;
+        await withVaultLock(() => { assertVaultEpoch(expectedEpoch); assertStoredVault(expectedRaw); localStorage.setItem(STORAGE_KEY, JSON.stringify(created.envelope)); clearServerBaseline(); session = created; });
       }
       lastActivity = Date.now();
       void saveBackup(JSON.stringify(session!.envelope)).catch(() => undefined);
@@ -194,6 +216,8 @@ ${hasVault ? '<button id="locked-backup" class="outline-button full" type="butto
     const file = (event.target as HTMLInputElement).files?.[0];
     if (!file || gateBusy) return;
     gateBusy = true;
+    const expectedEpoch = vaultEpoch();
+    const expectedRaw = localStorage.getItem(STORAGE_KEY);
     try {
       if (file.size > 10_000_000) throw new Error("Sicherung ist zu groß (maximal 10 MB).");
       const passphrase = document.querySelector<HTMLInputElement>("#passphrase")!.value;
@@ -201,12 +225,15 @@ ${hasVault ? '<button id="locked-backup" class="outline-button full" type="butto
       const envelope = parseEnvelope(await file.text());
       const { data, key } = await unlockVault(envelope, passphrase);
       if (hasVault && !window.confirm("Den bestehenden lokalen Tresor durch diese Sicherung ersetzen?")) return;
-      const previous = localStorage.getItem(STORAGE_KEY);
-      if (previous) await saveBackup(previous);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
+      await withVaultLock(async () => {
+        assertVaultEpoch(expectedEpoch); assertStoredVault(expectedRaw);
+        if (expectedRaw) await saveBackup(expectedRaw);
+        assertVaultEpoch(expectedEpoch); assertStoredVault(expectedRaw);
+        invalidateVault(); clearDrafts(); resetTaskEditor(); resetPasswordEditor(); editingNote = null;
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
+        clearServerBaseline(); session = { data, key, envelope };
+      });
       void saveBackup(JSON.stringify(envelope)).catch(() => undefined);
-      clearServerBaseline();
-      session = { data, key, envelope };
       lastActivity = Date.now();
       await revealWorkspace(app, render);
     } catch (error) {
@@ -243,17 +270,16 @@ function renderShell(): void {
   document.querySelector("#backup-status")!.textContent = backupError;
   addGlobalSearch(document.querySelector<HTMLElement>(".topbar")!, session!.data, (kind, id) => {
     if (kind === "passwords") openPassword(id);
+    if (kind === "tasks") openTask(id);
+    if (kind === "finances") openFinanceEntry(id);
     tab = kind as Tab; editingNote = kind === "notes" ? id : null; render();
+    [...app.querySelectorAll<HTMLElement>("[data-entry-id]")].find((e) => e.dataset.entryId === id)?.scrollIntoView({ block: "center" });
   });
   document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach((button) => {
     button.classList.toggle("active", button.dataset.tab === tab);
     button.addEventListener("click", () => { tab = button.dataset.tab as Tab; editingNote = null; render(); });
   });
-  const lock = () => {
-    session = null;
-    tab = "dashboard";
-    render();
-  };
+  const lock = lockVault;
   document.querySelector<HTMLButtonElement>("#lock-button")!.addEventListener("click", lock);
   document.querySelector<HTMLButtonElement>("#mobile-lock")!.addEventListener("click", lock);
   document.querySelector<HTMLButtonElement>("#export-button")!.addEventListener("click", () => {
@@ -291,7 +317,8 @@ function taskList(tasks: Task[], emptyText: string): HTMLElement {
     checkbox.checked = task.done;
     checkbox.setAttribute("aria-label", `Aufgabe ${task.title} abschließen`);
     checkbox.addEventListener("change", () => {
-      changeData((data) => { completeTask(data, task.id, checkbox.checked); })
+      const done = checkbox.checked;
+      changeData((data) => { completeTask(data, task.id, done); })
         .catch(() => { checkbox.checked = !checkbox.checked; window.alert("Speichern fehlgeschlagen."); });
     });
     const text = element("div", "task-text");
@@ -328,7 +355,7 @@ function renderDashboard(content: HTMLElement): void {
     [String(open.filter((task) => task.due && task.due <= today).length), "Heute & überfällig", "◷"],
     [String(data.notes.length), "Notizen", "▤"],
     [String(data.passwords.length), "Zugänge", "⌘"],
-    [formatEuro(data.accounts.reduce((sum, account) => sum + balance(account, data.transactions), 0)), "Gesamtbestand", "◈"]
+    [formatEuro(sumCents(data.accounts.map((account) => balance(account, data.transactions)))), "Gesamtbestand", "◈"]
   ]) {
     const card = element("div", "stat-card");
     card.append(element("span", "stat-symbol", symbol), element("strong", "", value), element("span", "", label));
@@ -374,8 +401,8 @@ function renderNotes(content: HTMLElement): void {
   const exportButton = element("button", "outline-button", "Markdown exportieren");
   exportButton.addEventListener("click", () => {
     const files: Record<string, Uint8Array> = {};
-    for (const note of session!.data.notes) {
-      const filename = `${note.title.replace(/[\\/:*?"<>|]/g, "_").slice(0, 80)}-${note.id.slice(0, 8)}.md`;
+    for (const [index, note] of session!.data.notes.entries()) {
+      const filename = `${index + 1}-${note.title.replace(/[\\/:*?"<>|]/g, "_").slice(0, 80) || "Notiz"}.md`;
       files[filename] = strToU8(note.body);
     }
     const url = URL.createObjectURL(new Blob([zipSync(files) as BlobPart], { type: "application/zip" }));
@@ -393,13 +420,14 @@ function renderNotes(content: HTMLElement): void {
   importInput.className = "visually-hidden";
   importLabel.append(importInput);
   importInput.addEventListener("change", async () => {
+    const expectedEpoch = vaultEpoch();
     const files = [...(importInput.files || [])].filter((file) => file.name.toLowerCase().endsWith(".md"));
     if (!files.length) return;
     try {
       if (files.some((file) => file.size > 1_000_000) || files.reduce((sum, file) => sum + file.size, 0) > 10_000_000) throw new Error("Markdown-Import zu groß.");
       const notes = await Promise.all(files.map(async (file) => ({ id: crypto.randomUUID(),
         title: file.name.replace(/\.md$/i, ""), body: await file.text(), updatedAt: new Date().toISOString() })));
-      await changeData((data) => data.notes.push(...notes));
+      await changeData((data) => data.notes.push(...notes), expectedEpoch);
     } catch (error) { window.alert(error instanceof Error ? error.message : "Import fehlgeschlagen."); }
   });
   tools.append(importLabel, exportButton);
@@ -433,25 +461,28 @@ function renderNotes(content: HTMLElement): void {
     if (!links.length && !backlinks.length) related.append(element("span", "hint", "Noch keine Verknüpfungen."));
     editor.append(related);
   }
-  editor.querySelector<HTMLButtonElement>("#note-cancel")!.addEventListener("click", () => { editingNote = null; render(); });
+  editor.querySelector<HTMLButtonElement>("#note-cancel")!.addEventListener("click", () => { clearFormDraft(editor.querySelector<HTMLFormElement>("form")!); editingNote = null; render(); });
   editor.querySelector<HTMLFormElement>("form")!.addEventListener("submit", async (event) => {
     event.preventDefault();
     const title = editor.querySelector<HTMLInputElement>("#note-title")!.value.trim();
     const body = editor.querySelector<HTMLTextAreaElement>("#note-body")!.value;
+    const noteId = selected?.id;
+    const folder = editor.querySelector<HTMLInputElement>("#note-folder")!.value.trim();
+    const tags = [...new Set(editor.querySelector<HTMLInputElement>("#note-tags")!.value.split(",").map((t) => t.trim()).filter(Boolean))];
     if (!title) return;
     try {
       await changeData((data) => {
-        const note = data.notes.find((entry) => entry.id === editingNote);
-        const folder = editor.querySelector<HTMLInputElement>("#note-folder")!.value.trim();
-        const tags = [...new Set(editor.querySelector<HTMLInputElement>("#note-tags")!.value.split(",").map((t) => t.trim()).filter(Boolean))];
+        const note = data.notes.find((entry) => entry.id === noteId);
         if (note) { if (note.title !== title || note.body !== body) rememberNote(note); Object.assign(note, { title, body, folder, tags, updatedAt: new Date().toISOString() }); }
         else data.notes.push({ id: crypto.randomUUID(), title, body, folder, tags, updatedAt: new Date().toISOString() });
       });
-      editingNote = null;
+      if (editingNote === noteId) editingNote = null;
       render();
     } catch { window.alert("Notiz konnte nicht gespeichert werden."); }
   });
-  appendNoteExtras(editor, selected, changeData);
+  editor.querySelector<HTMLFormElement>("form")!.dataset.draftKey = selected?.id || "new";
+  const noteEpoch = vaultEpoch();
+  appendNoteExtras(editor, selected, (update) => changeData(update, noteEpoch));
   content.append(editor);
   const notes = element("section", "panel list-panel");
   notes.append(element("h2", "", `Alle Notizen (${session!.data.notes.length})`));
@@ -491,7 +522,8 @@ function noteGraph(notes: Note[]): HTMLElement {
   const panel = element("section", "panel graph-panel");
   panel.append(element("h2", "", "Wissensnetz"));
   const shown = notes.slice(0, 24);
-  const byTitle = new Map(shown.map((note, index) => [note.title, index]));
+  const byTitle = new Map<string, number>();
+  shown.forEach((note, index) => { if (!byTitle.has(note.title)) byTitle.set(note.title, index); });
   const ns = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(ns, "svg");
   svg.setAttribute("viewBox", "0 0 700 380");
@@ -529,7 +561,8 @@ function noteGraph(notes: Note[]): HTMLElement {
 }
 
 function render(): void {
-  draftDirty = false;
+  viewController.abort(); viewController = new AbortController();
+  const drafts = session ? captureDrafts(app) : [];
   if (!session) { renderGate(); return; }
   const action = new URLSearchParams(location.search).get("action");
   if (action && ["task", "note"].includes(action)) { tab = action === "task" ? "tasks" : "notes"; history.replaceState(null, "", location.pathname); }
@@ -538,7 +571,12 @@ function render(): void {
   if (tab === "dashboard") renderDashboard(content);
 
   if (tab === "notes") renderNotes(content);
-  const context: ViewContext = { content, data: session.data, changeData, render, heading, element };
+  const active = session;
+  const expectedEpoch = vaultEpoch();
+  const context: ViewContext = { content, data: active.data,
+    changeData: (update) => content.isConnected ? changeData(update, expectedEpoch) : Promise.reject(new Error("Diese Ansicht ist nicht mehr aktiv. Bitte erneut versuchen.")),
+    render: () => { assertVaultEpoch(expectedEpoch); render(); },
+    isActive: () => vaultEpoch() === expectedEpoch && Boolean(session) && content.isConnected, signal: AbortSignal.any([vaultSignal(), viewController.signal]), heading, element };
   if (tab === "dashboard") dashboardTools(context, (next) => { tab = next as Tab; render(); });
   if (tab === "tasks") renderAdvancedTasks(context);
   if (tab === "passwords") renderPasswords(context);
@@ -549,14 +587,20 @@ function render(): void {
       ...context,
       envelope: session.envelope,
       replaceVault: async (envelope, passphrase) => {
+        assertVaultEpoch(expectedEpoch);
+        const previous = JSON.stringify(active.envelope);
         const { data, key } = await unlockVault(envelope, passphrase);
-        const previous = localStorage.getItem(STORAGE_KEY);
-        if (previous) await saveBackup(previous);
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
-        void saveBackup(JSON.stringify(envelope)).catch(() => undefined);
-        clearServerBaseline();
-        session = { data, key, envelope };
-        render();
+        await withVaultLock(async () => {
+          assertVaultEpoch(expectedEpoch); assertStoredVault(previous);
+          if (session !== active || pendingChanges) throw new Error("Lokale Daten geändert. Bitte erneut laden.");
+          await saveBackup(previous);
+          assertVaultEpoch(expectedEpoch); assertStoredVault(previous);
+          if (session !== active || pendingChanges) throw new Error("Lokale Daten geändert. Bitte erneut laden.");
+          invalidateVault(); clearDrafts(); resetTaskEditor(); resetPasswordEditor(); editingNote = null;
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope)); clearServerBaseline();
+          session = { data, key, envelope }; lastActivity = Date.now();
+        });
+        void saveBackup(JSON.stringify(envelope)).catch(() => undefined); render();
       },
       navigate: (next) => { tab = next; render(); }
     };
@@ -564,13 +608,18 @@ function render(): void {
     else if (tab === "sync") renderSync(connected);
     else renderServers(connected);
   }
+  content.querySelectorAll<HTMLFormElement>("form").forEach((form, index) => { if (!form.id) form.id = `workspace-form-${tab}-${index}`; });
+  restoreDrafts(app, drafts);
   checkReminders(context);
   captureSharedLink(context);
 }
 
 window.setInterval(() => { const badge = document.querySelector("#sync-status"); if (badge) badge.textContent = getSyncStatus(); const backup = document.querySelector("#backup-status"); if (backup) backup.textContent = backupError; }, 3000);
 window.setInterval(() => { if (session) checkReminders({ data: session.data } as ViewContext); }, 15_000);
-render();
+try { render(); }
+catch {
+  app.replaceChildren(element("main", "gate", "Der Browser-Speicher ist nicht verfügbar. Erlaube Website-Speicher für AllINONE und lade die Seite neu. Vorhandene Browserdaten bitte nicht löschen."));
+}
 if (import.meta.env.PROD && "serviceWorker" in navigator) {
   window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js", { updateViaCache: "none" }).catch(() => undefined));
 }

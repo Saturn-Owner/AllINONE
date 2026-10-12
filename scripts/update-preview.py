@@ -46,7 +46,7 @@ def extract_package(payload, destination, expected_build):
         seen = set()
         for item in entries:
             path = PurePosixPath(item.filename)
-            if ("\\" in item.filename or path.is_absolute() or ".." in path.parts
+            if ("\0" in item.orig_filename or "\\" in item.filename or path.is_absolute() or ".." in path.parts
                     or len(path.parts) < 2 or path.parts[0] != "AllINONE-Linux-Test"
                     or path.as_posix() != item.filename.rstrip("/")
                     or stat.S_ISLNK(item.external_attr >> 16) or item.filename in seen):
@@ -63,7 +63,8 @@ def extract_package(payload, destination, expected_build):
                 target.write_bytes(archive.read(item))
     if not (destination / "app" / "index.html").is_file() or any(not (destination / name).is_file() for name in ROOT_FILES):
         raise ValueError("Das Update-Paket ist unvollständig.")
-    if json.loads((destination / "version.json").read_text())["build"] != expected_build:
+    version = json.loads((destination / "version.json").read_text())
+    if not isinstance(version, dict) or version.get("build") != expected_build:
         raise ValueError("Die Version im Paket stimmt nicht mit dem Download überein.")
 
 
@@ -97,6 +98,34 @@ def install_files(installation, candidate, backup):
         raise
 
 
+def installed_build(installation, version):
+    if not isinstance(version.get("version"), str):
+        return None
+    names = [name for name in ROOT_FILES if name != "version.json"]
+    if (installation / "app").is_symlink():
+        return None
+    names.extend("app/" + path.relative_to(installation / "app").as_posix()
+                 for path in (installation / "app").rglob("*") if path.is_file())
+    digest = hashlib.sha256(version["version"].encode() + b"\0")
+    total = 0
+    try:
+        for name in sorted(names):
+            path = installation / name
+            if path.is_symlink():
+                return None
+            size = path.stat().st_size
+            total += size
+            if total > MAX_PACKAGE_BYTES:
+                return None
+            digest.update(name.encode() + b"\0" + size.to_bytes(8, "big"))
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(65536), b""):
+                    digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
 def update(installation, source):
     if not (installation / "app" / "index.html").is_file() or not (installation / "starten.py").is_file():
         raise ValueError("Bitte aktualisieren.py im entpackten Ordner mit starten.py ausführen.")
@@ -116,7 +145,7 @@ def update(installation, source):
         current = json.loads((installation / "version.json").read_text())
     except (OSError, ValueError):
         current = {}
-    if isinstance(current, dict) and current.get("build") == build:
+    if isinstance(current, dict) and current.get("build") == build and installed_build(installation, current) == build:
         return False
     payload = download(f"{source}/downloads/{archive_path}", MAX_PACKAGE_BYTES)
     if len(payload) != size or hashlib.sha256(payload).hexdigest() != expected_hash:

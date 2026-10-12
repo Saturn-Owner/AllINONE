@@ -1,15 +1,10 @@
 import type { Task, VaultData } from "./vault.ts";
 
-export function localDate(date = new Date()): string {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-}
-export function validDate(value: string): boolean {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  const date = new Date(`${value}T12:00:00`);
-  return Number.isFinite(date.getTime()) && localDate(date) === value;
-}
+import { localDate, validDate } from "./dates.ts";
+export { localDate, validDate } from "./dates.ts";
 export function nextTaskDate(value: string, repeat: Task["repeat"], anchorDay?: number): string {
   if (!validDate(value)) throw new Error("Ein gültiger Termin ist für Wiederholungen erforderlich.");
+  if (!repeat || repeat === "keine") return value;
   const date = new Date(`${value}T12:00:00`);
   if (repeat === "monatlich") {
     const day = anchorDay || date.getDate();
@@ -60,41 +55,51 @@ export function parseCsv(raw: string): string[][] {
   const text = raw.replace(/^\uFEFF/, "");
   const first = text.split(/\r?\n/)[0];
   const separator = first.includes(";") ? ";" : ",";
-  const rows: string[][] = []; let row: string[] = []; let field = ""; let quoted = false;
+  const rows: string[][] = []; let row: string[] = []; let field = ""; let quoted = false; let closed = false;
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
-    if (c === '"') {
-      if (quoted && text[i + 1] === '"') { field += '"'; i++; }
-      else if (quoted || field === "") quoted = !quoted;
-      else throw new Error("Ungültige CSV-Anführungszeichen.");
-    } else if (!quoted && (c === separator || c === "\n" || c === "\r")) {
-      row.push(field); field = "";
+    if (quoted) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else { quoted = false; closed = true; }
+      } else field += c;
+    } else if (c === separator || c === "\n" || c === "\r") {
+      row.push(field); field = ""; closed = false;
       if (c !== separator) { if (row.some(Boolean)) rows.push(row); row = []; if (c === "\r" && text[i + 1] === "\n") i++; }
-    } else field += c;
+    } else if (c === '"' && field === "" && !closed) quoted = true;
+    else { if (closed || c === '"') throw new Error("Ungültige CSV-Anführungszeichen."); field += c; }
   }
   if (quoted) throw new Error("CSV enthält ein nicht geschlossenes Feld.");
   row.push(field); if (row.some(Boolean)) rows.push(row);
   if (rows.length > 5001) throw new Error("Maximal 5000 Buchungen pro Import.");
   return rows;
 }
-export interface CsvTransaction { date: string; amountCents: number; payee: string; category: string; note: string }
+export interface CsvTransaction { date: string; amountCents: number; payee: string; category: string; note: string; accountName?: string; sourceAccountId?: string }
 export function transactionCsv(raw: string): CsvTransaction[] {
   const rows = parseCsv(raw); const headers = rows.shift()?.map((h) => h.trim().toLocaleLowerCase()) || [];
+  if (new Set(headers).size !== headers.length) throw new Error("CSV enthält doppelte Spaltennamen.");
+  const accountColumn = headers.indexOf("konto");
+  const accountIdColumn = headers.indexOf("konto-id");
+  const formatColumn = headers.indexOf("allinone-format");
   const indices = ["datum", "betrag", "empfänger", "kategorie", "notiz"].map((h) => headers.indexOf(h));
   if (indices.slice(0, 3).some((i) => i < 0)) throw new Error("CSV braucht die Spalten Datum, Betrag und Empfänger. Kategorie und Notiz sind optional.");
   return rows.map((row, index) => {
-    const [date, amount, payee, category, note] = indices.map((i) => row[i]?.trim() || "");
+    if (row.length !== headers.length) throw new Error(`CSV-Zeile ${index + 2} hat eine abweichende Spaltenzahl.`);
+    const ownFormat = formatColumn >= 0 && row[formatColumn] === "1";
+    const decode = (value: string) => ownFormat && /^'\s*[=+\-@]/.test(value) ? value.slice(1) : value;
+    const [date, amount, payee, category, note] = indices.map((i) => decode(ownFormat ? row[i] || "" : row[i]?.trim() || ""));
     const value = amount.replace(",", ".");
-    if (!validDate(date) || !/^-?\d{1,9}(\.\d{1,2})?$/.test(value) || !payee || payee.length > 160 || category.length > 80 || note.length > 500) throw new Error(`Ungültige Buchung in CSV-Zeile ${index + 2}. Datum: JJJJ-MM-TT; Betrag: negativ für Ausgaben.`);
+    if (!validDate(date) || !/^-?\d{1,14}(\.\d{1,2})?$/.test(value) || !payee || payee.length > 160 || category.length > 80 || note.length > 500) throw new Error(`Ungültige Buchung in CSV-Zeile ${index + 2}. Datum: JJJJ-MM-TT; Betrag: negativ für Ausgaben.`);
     const [whole, decimal = ""] = value.replace("-", "").split(".");
-    const amountCents = (Number(whole) * 100 + Number(decimal.padEnd(2, "0"))) * (value.startsWith("-") ? -1 : 1);
+    const amountCents = Number((BigInt(whole) * 100n + BigInt(decimal.padEnd(2, "0"))) * (value.startsWith("-") ? -1n : 1n));
+    if (!Number.isSafeInteger(amountCents)) throw new Error(`Betrag in Zeile ${index + 2} ist zu groß.`);
     if (!amountCents) throw new Error(`Betrag in Zeile ${index + 2} ist null.`);
-    return { date, amountCents, payee, category, note };
+    return { date, amountCents, payee, category, note, ...(accountColumn >= 0 ? { accountName: decode(row[accountColumn].trim()) } : {}), ...(accountIdColumn >= 0 ? { sourceAccountId: row[accountIdColumn].trim() } : {}) };
   });
 }
 export function csvCell(value: string): string { return `"${value.replaceAll('"', '""')}"`; }
 export function tasksCalendar(tasks: Task[]): string {
-  const escape = (s: string) => s.replaceAll("\\", "\\\\").replaceAll("\n", "\\n").replaceAll(";", "\\;").replaceAll(",", "\\,");
+  const escape = (s: string) => s.replaceAll("\\", "\\\\").replace(/\r\n?|\n/g, "\\n").replaceAll(";", "\\;").replaceAll(",", "\\,");
   // Fold long UTF-8 content lines according to RFC 5545.
   const fold = (line: string) => { let out = "", size = 0; for (const c of line) { const bytes = new TextEncoder().encode(c).length; if (size + bytes > 73) { out += "\r\n "; size = 1; } out += c; size += bytes; } return out; };
   return ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//AllINONE//Aufgaben//DE", ...tasks.filter((t) => t.due && !t.done).flatMap((t) => ["BEGIN:VEVENT", `UID:${escape(t.id)}@allinone`, `DTSTAMP:${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+/, "")}`, `DTSTART;VALUE=DATE:${t.due!.replaceAll("-", "")}`, `SUMMARY:${escape(t.title)}`, "END:VEVENT"]), "END:VCALENDAR"].map(fold).join("\r\n") + "\r\n";

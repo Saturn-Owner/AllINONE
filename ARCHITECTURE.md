@@ -24,3 +24,11 @@ Vor einer produktiven Nutzung als Passwortmanager oder für sensible Finanzen si
 - **Autofill:** Das MV3-Paket wird aus derselben Tresorimplementierung gebaut. Es importiert eine verschlüsselte Datei, entschlüsselt im Popup und hält passende Einträge nur im Popup-Speicher. `activeTab`/`scripting`, keine allgemeinen Host-Berechtigungen. Funktion prüft Origin beim Ausfüllen erneut, Hauptframe und eindeutiges Passwortfeld. Kein Form-Submit. Zwei Minuten Popup-Sperre; Datei muss nach Tresoränderungen neu exportiert werden.
 - **KI:** Authentifizierter, Origin-geschützter `/api/ai`-Endpunkt. Ollama-Adresse ist nur serverseitige Konfiguration. Nur ausdrücklich freigegebener Titel/Text, begrenzte Antwort und Zeitlimit. Keine Werkzeuge, keine Aktionen und keine automatische Übernahme. Betreiber des KI-Diensts erhält diesen Inhalt im Klartext.
 - **Monitoring:** Feste Linux-Befehle mit Ausgabe- und Zeitlimit liefern strukturierte CPU-/RAM-/Dateisystemwerte. Prüfung jede Minute in der aktiven VPS-Ansicht; keine permanenten Hintergrundalarme.
+
+## Schutz gegen parallele Vorgänge (0.2.1)
+
+Lokale Änderungen und Wiederherstellungen verwenden Web Locks pro Ursprung sowie einen Vergleich mit der zuvor gelesenen Tresorhülle. Ein Sitzungszähler verwirft Ergebnisse, die nach Sperren oder einem Tresorwechsel eintreffen. Entwürfe werden während lokaler Darstellungsänderungen im Arbeitsspeicher erhalten; Sperren verwirft sie. Eine laufende automatische Übernahme prüft Entwürfe nochmals unmittelbar vor der Speicherung.
+
+Automatische und manuelle Servervorgänge teilen eine Warteschlange und einen eigenen Web Lock. Eine im Browser gespeicherte Koppelgeneration verhindert, dass eine verspätete Antwort die Synchronisation nach einer Wiederherstellung in einem anderen Fenster erneut aktiviert. Revisionsprüfung auf dem Server bleibt zusätzlich erforderlich. HTTP-Timeouts und Abbruchsignale begrenzen veraltete Anfragen.
+
+Backup-Auswahl, Einfügen und Aufräumen erfolgen in einer einzelnen IndexedDB-Schreibtransaktion; damit gilt die Grenze von 20 Ständen auch zwischen Browserfenstern. Metadaten enthalten eine monotone Reihenfolge, um Sicherungen aus derselben Millisekunde eindeutig zu sortieren.

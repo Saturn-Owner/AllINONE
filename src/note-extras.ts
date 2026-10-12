@@ -1,3 +1,4 @@
+import { hasFormDraft } from "./drafts";
 import type { Note, VaultData } from "./vault";
 import { downloadFile } from "./productivity";
 export const NOTE_TEMPLATES: Record<string, string> = {
@@ -52,6 +53,7 @@ export function appendNoteExtras(editor: HTMLElement, selected: Note | undefined
       const text = document.createElement("span"); text.textContent = `${new Date(version.updatedAt).toLocaleString("de-DE")} · ${version.title}`;
       const button = document.createElement("button"); button.className = "outline-button"; button.textContent = "Version wiederherstellen";
       button.onclick = () => {
+        if (hasFormDraft(form)) return window.alert("Speichere oder verwerfe den aktuellen Entwurf zuerst, bevor du eine frühere Version wiederherstellst.");
         if (!window.confirm("Titel und Inhalt durch diese Version ersetzen? Der aktuelle Stand bleibt in der Historie.")) return;
         void changeData((d) => { const n = d.notes.find((n) => n.id === selected.id); if (n) { rememberNote(n); n.title = version.title; n.body = version.body; n.updatedAt = new Date().toISOString(); } }).catch(() => window.alert("Wiederherstellung fehlgeschlagen."));
       }; row.append(text, button); history.append(row);

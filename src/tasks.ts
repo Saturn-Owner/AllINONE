@@ -1,3 +1,5 @@
+import { validMonth } from "./dates";
+import { clearFormDraft } from "./drafts";
 import type { ViewContext } from "./features";
 import type { Task, Priority } from "./vault";
 import { completeTask, downloadFile, localDate, tasksCalendar } from "./productivity";
@@ -10,11 +12,12 @@ export function renderAdvancedTasks(ctx: ViewContext): void {
   const panel = el("section", "panel");
   const selected = data.tasks.find((t) => t.id === editing);
   panel.innerHTML = `<h2>${selected ? "Aufgabe bearbeiten" : "Neue Aufgabe"}</h2><form id="task-form" class="task-form"><label for="task-title">Titel</label><input id="task-title" maxlength="160" required /><div class="form-pair"><div><label for="task-due">Fällig am</label><input id="task-due" type="date" /></div><div><label for="task-priority">Priorität</label><select id="task-priority"><option value="mittel">Mittel</option><option value="niedrig">Niedrig</option><option value="hoch">Hoch</option></select></div></div><div class="form-pair"><div><label for="task-repeat">Wiederholung</label><select id="task-repeat"><option value="keine">Keine</option><option value="täglich">Täglich</option><option value="wöchentlich">Wöchentlich</option><option value="monatlich">Monatlich</option></select></div><div><label for="task-reminder">Erinnerung</label><input id="task-reminder" type="datetime-local" /></div></div><label for="task-subtasks">Unteraufgaben · eine pro Zeile</label><textarea id="task-subtasks" rows="3" maxlength="4000"></textarea><div class="button-row"><button class="primary" type="submit">${selected ? "Aufgabe speichern" : "Aufgabe hinzufügen +"}</button><button id="task-cancel" class="outline-button" type="button">Leeren</button></div></form>`;
+  panel.querySelector<HTMLFormElement>("form")!.dataset.draftKey = selected?.id || "new";
   const value = (id: string) => panel.querySelector<HTMLInputElement>(`#${id}`)!;
   value("task-title").value = selected?.title || ""; value("task-due").value = selected?.due || "";
   value("task-priority").value = selected?.priority || "mittel"; value("task-repeat").value = selected?.repeat || "keine";
   value("task-reminder").value = selected?.reminderAt || ""; value("task-subtasks").value = selected?.subtasks?.map((s) => s.title).join("\n") || "";
-  panel.querySelector("#task-cancel")!.addEventListener("click", () => { editing = null; ctx.render(); });
+  panel.querySelector("#task-cancel")!.addEventListener("click", () => { clearFormDraft(panel.querySelector<HTMLFormElement>("form")!); editing = null; ctx.render(); });
   panel.querySelector("form")!.addEventListener("submit", async (event) => {
     event.preventDefault();
     const title = value("task-title").value.trim(); if (!title) return;
@@ -22,14 +25,16 @@ export function renderAdvancedTasks(ctx: ViewContext): void {
     if (repeat !== "keine" && !due) return window.alert("Wiederkehrende Aufgaben brauchen einen Termin.");
     const titles = value("task-subtasks").value.split("\n").map((s) => s.trim()).filter(Boolean);
     if (titles.length > 30) return window.alert("Maximal 30 Unteraufgaben.");
-    const subtasks = titles.map((t) => selected?.subtasks?.find((s) => s.title === t) || { id: crypto.randomUUID(), title: t, done: false });
+    const used = new Set<string>();
+    const subtasks = titles.map((t) => { const old = selected?.subtasks?.find((s) => s.title === t && !used.has(s.id)); if (old) { used.add(old.id); return old; } return { id: crypto.randomUUID(), title: t, done: false }; });
+    const taskId = selected?.id;
+    const fields = { title, due, repeat, repeatDay: selected?.due === due && selected.repeat === repeat ? selected.repeatDay : due ? Number(due.slice(8, 10)) : undefined, subtasks, priority: value("task-priority").value as Priority, reminderAt: value("task-reminder").value };
     try {
       await ctx.changeData((next) => {
-        const item = next.tasks.find((t) => t.id === editing);
-        const fields = { title, due, repeat, repeatDay: due ? Number(due.slice(8, 10)) : undefined, subtasks, priority: value("task-priority").value as Priority, reminderAt: value("task-reminder").value };
+        const item = next.tasks.find((t) => t.id === taskId);
         if (item) Object.assign(item, fields);
         else next.tasks.push({ ...fields, id: crypto.randomUUID(), done: false, status: "offen", createdAt: new Date().toISOString() });
-      }); editing = null; ctx.render();
+      }); if (editing === taskId) editing = null; ctx.render();
     } catch { window.alert("Aufgabe konnte nicht gespeichert werden."); }
   }); content.append(panel);
   const tools = el("div", "button-row wrap");
@@ -41,7 +46,7 @@ export function renderAdvancedTasks(ctx: ViewContext): void {
   const list = el("section", "panel list-panel");
   if (view === "kalender") {
     const month = el("input"); month.type = "month"; month.value = calendarMonth; month.setAttribute("aria-label", "Kalendermonat");
-    month.onchange = () => { calendarMonth = month.value; ctx.render(); }; list.append(month);
+    month.onchange = () => { if (validMonth(month.value)) calendarMonth = month.value; ctx.render(); }; list.append(month);
     const days = new Date(Number(calendarMonth.slice(0, 4)), Number(calendarMonth.slice(5, 7)), 0).getDate();
     for (let day = 1; day <= days; day++) {
       const date = `${calendarMonth}-${String(day).padStart(2, "0")}`;
@@ -67,7 +72,7 @@ export function renderAdvancedTasks(ctx: ViewContext): void {
 function taskRow(ctx: ViewContext, task: Task): HTMLElement {
   const { element: el } = ctx; const wrap = el("div", "advanced-task"); const row = el("div", `task-row ${task.done ? "done" : ""}`);
   const check = el("input"); check.type = "checkbox"; check.checked = task.done; check.setAttribute("aria-label", `Aufgabe ${task.title} abschließen`);
-  check.onchange = () => void ctx.changeData((next) => completeTask(next, task.id, check.checked)).catch(() => window.alert("Speichern fehlgeschlagen."));
+  check.onchange = () => { const done = check.checked; void ctx.changeData((next) => completeTask(next, task.id, done)).catch(() => window.alert("Speichern fehlgeschlagen.")); };
   const text = el("div", "task-text"); text.append(el("strong", "", task.title), el("small", "", `${task.due || "Ohne Termin"} · ${task.priority}${task.repeat && task.repeat !== "keine" ? ` · ${task.repeat}` : ""}`));
   const edit = el("button", "text-button", "Bearbeiten"); edit.onclick = () => { editing = task.id; ctx.render(); document.querySelector<HTMLInputElement>("#task-title")?.focus(); };
   const remove = el("button", "icon-button", "×"); remove.setAttribute("aria-label", `Aufgabe ${task.title} löschen`);
@@ -76,10 +81,14 @@ function taskRow(ctx: ViewContext, task: Task): HTMLElement {
   const status = el("select"); status.setAttribute("aria-label", `Status von ${task.title}`);
   for (const [value, label] of [["offen", "Offen"], ["in-arbeit", "In Arbeit"], ["erledigt", "Erledigt"]]) status.add(new Option(label, value));
   status.value = task.done ? "erledigt" : task.status || "offen";
-  status.onchange = () => void ctx.changeData((next) => { completeTask(next, task.id, status.value === "erledigt"); next.tasks.find((t) => t.id === task.id)!.status = status.value as Task["status"]; }).catch(() => window.alert("Speichern fehlgeschlagen.")); wrap.append(status);
+  status.onchange = () => { const value = status.value as Task["status"]; void ctx.changeData((next) => { completeTask(next, task.id, value === "erledigt"); const current = next.tasks.find((t) => t.id === task.id); if (current) current.status = value; }).catch(() => window.alert("Speichern fehlgeschlagen.")); }; wrap.append(status);
   for (const sub of task.subtasks || []) {
     const label = el("label", "subtask"); const input = el("input"); input.type = "checkbox"; input.checked = sub.done;
-    input.onchange = () => void ctx.changeData((next) => { const s = next.tasks.find((t) => t.id === task.id)?.subtasks?.find((s) => s.id === sub.id); if (s) s.done = input.checked; }).catch(() => window.alert("Speichern fehlgeschlagen."));
+    input.onchange = () => { const done = input.checked; void ctx.changeData((next) => { const s = next.tasks.find((t) => t.id === task.id)?.subtasks?.find((s) => s.id === sub.id); if (s) s.done = done; }).catch(() => window.alert("Speichern fehlgeschlagen.")); };
     label.append(input, document.createTextNode(sub.title)); wrap.append(label);
   } return wrap;
 }
+
+export function resetTaskEditor(): void { editing = null; }
+
+export function openTask(id: string): void { view = "liste"; editing = id; }

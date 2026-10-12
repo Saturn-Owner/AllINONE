@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createVault } from "../src/vault.ts";
 import { hashPassword } from "../server/auth.mjs";
 import { createApp } from "../server/index.mjs";
 import ssh2 from "ssh2";
@@ -28,7 +29,7 @@ test("self-hosted server enforces login, origin and revision conflicts", async (
     assert.equal(response.status, 200);
     const cookie = response.headers.get("set-cookie").split(";")[0];
     assert.match(response.headers.get("set-cookie"), /HttpOnly; SameSite=Strict/);
-    const envelope = { version: 1, cipher: { data: "encrypted-data" } };
+    const { envelope } = await createVault("verschlüsselte Server Testdaten");
     response = await fetch(`${url}/api/sync`, { method: "PUT", headers: { origin, cookie, "content-type": "application/json" }, body: JSON.stringify({ revision: null, envelope }) });
     assert.equal(response.status, 200);
     const { revision } = await response.json();

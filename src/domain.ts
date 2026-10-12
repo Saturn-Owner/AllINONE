@@ -8,21 +8,29 @@ export function parseEuro(value: string): number {
 }
 
 export function formatEuro(cents: number): string {
-  return new Intl.NumberFormat("de-DE", { style: "currency", currency: "EUR" }).format(cents / 100);
+  if (!Number.isSafeInteger(cents)) throw new Error("Ungültiger Finanzbetrag.");
+  const amount = BigInt(cents); const whole = amount / 100n;
+  const fraction = (amount < 0n ? -amount : amount) % 100n;
+  const display = whole === 0n && cents < 0 ? -0 : whole;
+  return new Intl.NumberFormat("de-DE", { style: "currency", currency: "EUR" }).formatToParts(display)
+    .map((part) => part.type === "fraction" ? fraction.toString().padStart(2, "0") : part.value).join("");
 }
 
+export function sumCents(values: number[]): number {
+  const sum = values.reduce((total, value) => {
+    if (!Number.isSafeInteger(value)) throw new Error("Ungültiger Finanzbetrag.");
+    return total + BigInt(value);
+  }, 0n);
+  const result = Number(sum);
+  if (!Number.isSafeInteger(result)) throw new Error("Die Finanzsumme ist zu groß für eine genaue Cent-Berechnung.");
+  return result;
+}
 export function balance(account: Account, transactions: Transaction[]): number {
-  return account.openingBalanceCents + transactions
-    .filter((item) => item.accountId === account.id)
-    .reduce((sum, item) => sum + item.amountCents, 0);
+  return sumCents([account.openingBalanceCents, ...transactions.filter((item) => item.accountId === account.id).map((item) => item.amountCents)]);
 }
-
 export function monthTotals(transactions: Transaction[], month: string): { income: number; expenses: number } {
   const current = transactions.filter((item) => item.date.startsWith(month));
-  return {
-    income: current.filter((item) => item.amountCents > 0).reduce((sum, item) => sum + item.amountCents, 0),
-    expenses: -current.filter((item) => item.amountCents < 0).reduce((sum, item) => sum + item.amountCents, 0)
-  };
+  return { income: sumCents(current.filter((item) => item.amountCents > 0).map((item) => item.amountCents)), expenses: sumCents(current.filter((item) => item.amountCents < 0).map((item) => -item.amountCents)) };
 }
 
 export function nextRecurringDate(payment: RecurringPayment, now = new Date()): string {
@@ -60,4 +68,10 @@ export function generatePassword(length = 24): string {
     [result[i], result[j]] = [result[j], result[i]];
   }
   return result.join("");
+}
+
+export function decimalCents(cents: number): string {
+  if (!Number.isSafeInteger(cents)) throw new Error("Ungültiger Finanzbetrag.");
+  const amount = BigInt(cents); const absolute = amount < 0n ? -amount : amount;
+  return `${amount < 0n ? "-" : ""}${absolute / 100n},${(absolute % 100n).toString().padStart(2, "0")}`;
 }

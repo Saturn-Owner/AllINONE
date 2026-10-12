@@ -1,12 +1,14 @@
 import { parseEnvelope } from "./vault";
-export interface Backup { id: string; salt: string; createdAt: string; raw: string }
+export interface Backup { id: string; salt: string; createdAt: string; order?: number; raw: string }
 let database: Promise<IDBDatabase> | undefined;
 export let backupError = "";
 function db(): Promise<IDBDatabase> {
   if (!database) database = new Promise<IDBDatabase>((resolve, reject) => {
+    let blocked = false;
     const request = indexedDB.open("allinone-backups", 1);
     request.onupgradeneeded = () => request.result.createObjectStore("snapshots", { keyPath: "id" });
-    request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+    request.onblocked = () => { blocked = true; reject(new Error("Das Sicherungsarchiv ist durch ein anderes Fenster blockiert.")); };
+    request.onsuccess = () => { if (blocked) { request.result.close(); return; } request.result.onversionchange = () => { request.result.close(); database = undefined; }; resolve(request.result); }; request.onerror = () => reject(request.error);
   }).catch((error) => { database = undefined; throw error; });
   return database!;
 }
@@ -14,7 +16,7 @@ export async function listBackups(salt?: string): Promise<Backup[]> {
   const database = await db();
   return new Promise((resolve, reject) => {
     const tx = database.transaction("snapshots", "readonly"); const request = tx.objectStore("snapshots").getAll();
-    request.onsuccess = () => resolve((request.result as Backup[]).filter((b) => !salt || b.salt === salt).sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
+    request.onsuccess = () => resolve((request.result as Backup[]).filter((b) => !salt || b.salt === salt).sort((a, b) => (b.order || Date.parse(b.createdAt)) - (a.order || Date.parse(a.createdAt))));
     request.onerror = () => reject(request.error);
   });
 }
@@ -25,12 +27,16 @@ export function saveBackup(raw: string): Promise<void> {
     let salt = "unbekannt";
     try { salt = parseEnvelope(raw).kdf.salt; } catch { /* raw copy remains downloadable */ }
     const database = await db();
-    const existing = await listBackups(salt);
-    if (existing[0]?.raw === raw) return;
     await new Promise<void>((resolve, reject) => {
       const tx = database.transaction("snapshots", "readwrite"); const store = tx.objectStore("snapshots");
-      store.put({ id: crypto.randomUUID(), salt, createdAt: new Date().toISOString(), raw });
-      for (const old of existing.slice(19)) store.delete(old.id);
+      const request = store.getAll();
+      request.onsuccess = () => {
+        const existing = (request.result as Backup[]).filter((b) => b.salt === salt).sort((a, b) => (b.order || Date.parse(b.createdAt)) - (a.order || Date.parse(a.createdAt)));
+        if (existing[0]?.raw === raw) return;
+        const order = Math.max(Date.now(), existing[0]?.order || Date.parse(existing[0]?.createdAt || "") || 0) + 1;
+        store.put({ id: crypto.randomUUID(), salt, createdAt: new Date().toISOString(), order, raw });
+        for (const old of existing.slice(19)) store.delete(old.id);
+      };
       tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error);
     }); backupError = "";
   });

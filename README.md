@@ -22,7 +22,7 @@ Danach reicht für jedes weitere Update:
 python3 aktualisieren.py
 ```
 
-Der Befehl liest die aktuelle Paketversion auf `main` und lädt das dazugehörige Archiv mit einem eindeutigen Dateinamen samt SHA-256-Prüfsumme. Ein unverändertes Paket wird nicht erneut installiert. Ungültige Pakete ersetzen keine Dateien; bei einem Fehler während des Ersetzens wird der alte Dateistand wiederhergestellt. Die Prüfsumme prüft die Unversehrtheit, sie ist keine unabhängige Signatur. Updates vertrauen dem Code im Repository. Python 3 und Internetzugang reichen für den Aktualisierer.
+Der Befehl liest die aktuelle Paketversion auf `main` und lädt das dazugehörige Archiv mit einem eindeutigen Dateinamen samt SHA-256-Prüfsumme. Ein vollständiges, unverändertes Paket wird nicht erneut installiert. Fehlende oder beschädigte App-Dateien lösen eine erneute Installation aus. Ungültige Pakete ersetzen keine Dateien; bei einem Fehler während des Ersetzens wird der alte Dateistand wiederhergestellt. Die Prüfsumme prüft die Unversehrtheit, sie ist keine unabhängige Signatur. Updates vertrauen dem Code im Repository. Python 3 und Internetzugang reichen für den Aktualisierer.
 
 Anschließend `python3 starten.py` ausführen und die Browserseite neu laden. Denselben Browser, dasselbe Profil und **`http://localhost:4175/`** weiterverwenden: Der verschlüsselte Tresor liegt im Browser und wird vom Update nicht bearbeitet. Vor Updates eine verschlüsselte Sicherung exportieren. Ein Wechsel zu `127.0.0.1`, einem anderen Port oder einem anderen Browserprofil verwendet einen anderen lokalen Speicher.
 
@@ -30,7 +30,7 @@ Bei Änderungen der App vor dem Veröffentlichen `npm run package:linux` ausfüh
 
 ### Entwicklung mit Node.js
 
-Node.js 24 ist erforderlich (siehe `.node-version`).
+Ein aktueller Browser mit Web Crypto und Web Locks ist erforderlich; bei blockiertem Website-Speicher erscheint eine Fehlermeldung. Node.js 24 ist erforderlich (siehe `.node-version`).
 
 ```bash
 npm ci
@@ -38,6 +38,12 @@ npm run dev
 ```
 
 Die von Vite angezeigte Adresse öffnen. Für die installierbare Fassung `npm run build && npm run preview` ausführen. Die Installation erfolgt im Browser über „App installieren“ beziehungsweise „Zum Startbildschirm hinzufügen“. PWA und Web Crypto benötigen HTTPS oder `localhost`. Lokale Nutzung erfordert keinen Serverzugang; alle Tresordaten liegen verschlüsselt in `localStorage`. Regelmäßig eine verschlüsselte JSON-Sicherung exportieren.
+
+## Code Review und Fehlerkorrekturen in 0.2.1
+
+Die interne Gesamtprüfung und alle behobenen Fehler stehen in [CODE_REVIEW.md](CODE_REVIEW.md). Die Veröffentlichung korrigiert insbesondere parallele Tresorzugriffe, verspätete Synchronisation, verlorene Entwürfe, CSV-Kontozuordnung und Cache-/Update-Probleme. Passphrase, Verschlüsselung und Datenformat 3 bleiben erhalten. Gültige ältere Tresore lassen sich weiterhin öffnen; doppelte Unteraufgaben-IDs aus Version 0.2.0 werden ohne Inhaltsverlust repariert. Fehlerhafte Daten werden vor dem Übernehmen geprüft; die unveränderte verschlüsselte Datei bleibt exportierbar.
+
+Die Chromium-Erweiterung nach dem App-Update **ebenfalls neu herunterladen, entpacken und unter `chrome://extensions` / `edge://extensions` neu laden**. Eine entpackte Erweiterung aktualisiert sich nicht über den Python-Befehl.
 
 ## Funktionen in Version 0.2
 
@@ -47,7 +53,7 @@ Die von Vite angezeigte Adresse öffnen. Für die installierbare Fassung `npm ru
 - Erinnerungen und Kündigungsfristen in der App sowie optionale Browser-Mitteilungen. Sie funktionieren **nur bei geöffneter, entsperrter App**. Für geschlossene Apps die Aufgaben in eine Kalender-App exportieren und dort Erinnerungen einstellen.
 - Markdown-Notizen mit Vorschau, Wiki-Links, Rückverweisen, Graph, Suche im vollständigen Inhalt, Ordnern, Tags und Vorlagen. Je Notiz bis zu 20 frühere Textversionen. Anhänge bis 2 MB pro Datei und 3 MB pro Notiz; PNG/JPEG/WebP/GIF können angezeigt werden. Browser-Speicher ist begrenzt: Schlägt das Speichern fehl, bleibt der vorherige Tresor erhalten. Markdown-ZIP exportiert Text; die verschlüsselte Gesamtsicherung enthält zusätzlich Anhänge und Historie. Obsidian-Plugins sind nicht eingebettet.
 - Passworttresor mit Generator, Suche, Bearbeitung, zeitlich begrenzter Anzeige, Kopieren und Erkennung mehrfach verwendeter Passwörter. Unter Einstellungen: Download der Chromium-Autofill-Erweiterung.
-- Konten, Buchungen, Monatsauswertungen nach Kategorien und Monatsbudgets. CSV-Import mit Vorschau, Validierung und Duplikaterkennung; CSV-Export. Monatliche Zahlungen können als Abo markiert, pausiert und mit Kündigungsfristen versehen werden.
+- Konten, Buchungen, Monatsauswertungen nach Kategorien und Monatsbudgets. CSV-Import mit Vorschau, Validierung und Duplikaterkennung; CSV-Export. Die optionale Konto-Spalte ordnet Buchungen eindeutig zu; AllINONE-Exporte enthalten zusätzlich Konto-ID und Formatkennzeichen für einen verlustfreien Import einschließlich geschützter Tabellen-Formelfelder. Monatliche Zahlungen können als Abo markiert, pausiert und mit Kündigungsfristen versehen werden.
 - Automatische verschlüsselte Sicherungsstände in IndexedDB: letzte 20 unterschiedliche Stände je Tresor. Einstellungen bieten Export und Wiederherstellung; frühere Tresore lassen sich ebenfalls einblenden. Eine beschädigte aktuelle Datei wird vor dem Ersetzen als unveränderte Rohkopie gesichert. Auch bei gesperrtem Tresor lässt sich die aktuelle verschlüsselte Datei herunterladen. **Browser-Sicherungen ersetzen keine Kopie außerhalb des Geräts.**
 - Synchronisation mit eigenem Server: automatischer Upload, Abruf, sichtbarer Status, Revisionsschutz und Vergleich von lokalen/Server-Einträgen mit bewusster Auswahl. Beide Stände werden vor der Zusammenführung gesichert. Eintrag nur auf einer Seite: ausdrücklich entscheiden, ob neu oder gelöscht; ohne gemeinsamen Änderungsverlauf ist das nicht automatisch bestimmbar.
 - Google-Drive-Versionen im `appDataFolder` nach OAuth-Einrichtung. Upload und Wiederherstellung weiterhin bewusst per Klick.
@@ -87,7 +93,7 @@ Ohne Docker: `npm ci && npm run build`, dann `PUBLIC_ORIGIN`, `APP_PASSWORD_HASH
 
 ### VPS-Verwaltung aktivieren
 
-`hosts.example.json` nach `config/hosts.json` kopieren und Hostname, Benutzer, freigegebenes `rootPath`, Pfad zum privaten SSH-Schlüssel und **verifizierten** Host-Fingerprint eintragen. Den Fingerprint außerhalb dieser App prüfen. Einen eigens angelegten SSH-Benutzer mit minimalen Rechten und ein getrenntes Schlüsselpaar verwenden. Schlüssel nur unter `keys/` auf dem Server ablegen; keinesfalls im Browser oder Git. Beide Verzeichnisse sind ignoriert. Dann zusätzlich `-f compose.ssh.example.yml` beim Compose-Aufruf angeben. Die SSH-Hostkonfiguration darf nur vom Serverbetreiber bearbeitet werden.
+`hosts.example.json` nach `config/hosts.json` kopieren und Hostname, Benutzer, freigegebenes `rootPath`, Pfad zum privaten SSH-Schlüssel und **verifizierten** Host-Fingerprint eintragen. Den Fingerprint außerhalb dieser App prüfen. Einen eigens angelegten SSH-Benutzer mit minimalen Rechten und ein getrenntes Schlüsselpaar verwenden. Schlüssel nur unter `keys/` auf dem Server ablegen; keinesfalls im Browser oder Git. Beide Verzeichnisse sind ignoriert. Dann zusätzlich `-f compose.ssh.example.yml` beim Compose-Aufruf angeben. Die SSH-Hostkonfiguration darf nur vom Serverbetreiber bearbeitet werden. Im Docker-Container läuft die App als Benutzer `node` (UID 1000); die gemounteten Schlüssel müssen für diesen Benutzer lesbar sein und dürfen nicht allgemein lesbar gemacht werden.
 
 ## Eigene KI mit Ollama einrichten
 
@@ -111,6 +117,8 @@ In der Google Cloud Console die Drive API aktivieren, einen OAuth-Client vom Typ
 ## Prüfen
 
 ```bash
+npm run test:all
+# Alternativ einzeln:
 npm test
 npm run test:server
 npm run test:ui

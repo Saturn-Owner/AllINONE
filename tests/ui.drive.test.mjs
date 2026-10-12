@@ -18,7 +18,8 @@ test("Google Drive stores only an encrypted snapshot and restores it", { timeout
     browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || "/usr/bin/chromium", args: ["--no-sandbox"] });
     const context = await browser.newContext();
     await context.addInitScript(() => {
-      window.google = { accounts: { oauth2: { initTokenClient: ({ callback }) => ({ requestAccessToken: () => callback({ access_token: "test-token" }) }) } } };
+      let failOnce = true;
+      window.google = { accounts: { oauth2: { initTokenClient: ({ callback, error_callback }) => ({ requestAccessToken: () => { if (failOnce) { failOnce = false; error_callback({ type: "popup_closed" }); } else callback({ access_token: "test-token" }); } }) } } };
     });
     const page = await context.newPage(); page.setDefaultTimeout(5000);
     let snapshot;
@@ -35,7 +36,9 @@ test("Google Drive stores only an encrypted snapshot and restores it", { timeout
       if (request.url().includes("alt=media")) {
         return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(snapshot) });
       }
-      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ files: snapshot ? [{ id: "test_snapshot", name: "allinone-vault-test.json", modifiedTime: new Date().toISOString() }] : [] }) });
+      if (!snapshot) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ files: [] }) });
+      const second = new URL(request.url()).searchParams.has("pageToken");
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ files: [{ id: second ? "older_snapshot" : "test_snapshot", name: "allinone-vault-test.json", modifiedTime: new Date().toISOString() }], ...(second ? {} : { nextPageToken: "second_page" }) }) });
     });
     await page.goto(origin);
     await page.locator("#passphrase").fill("eine lange Drive Testpassphrase");
@@ -48,8 +51,11 @@ test("Google Drive stores only an encrypted snapshot and restores it", { timeout
     await page.locator("#google-client-id").fill("test.apps.googleusercontent.com");
     await page.getByRole("button", { name: "Client-ID speichern" }).click();
     await page.getByRole("button", { name: "Google Drive verbinden" }).click();
+    await page.getByText(/Google-Anmeldefenster wurde blockiert oder geschlossen/).waitFor();
+    await page.getByRole("button", { name: "Google Drive verbinden" }).click();
     await page.getByRole("button", { name: "Verschlüsselte Version hochladen" }).click();
-    await page.getByRole("button", { name: "Diese Version laden" }).waitFor();
+    await page.getByRole("button", { name: "Diese Version laden" }).first().waitFor();
+    assert.equal(await page.getByRole("button", { name: "Diese Version laden" }).count(), 2);
     assert.equal(snapshot.version, 1);
     assert.equal(uploadBody.includes("Vor dem Snapshot"), false);
     assert.ok(snapshot.cipher.data);
@@ -61,7 +67,7 @@ test("Google Drive stores only an encrypted snapshot and restores it", { timeout
     await page.locator('[data-tab="sync"]').click();
     await page.locator("#drive-passphrase").fill("eine lange Drive Testpassphrase");
     page.once("dialog", (dialog) => dialog.accept());
-    await page.getByRole("button", { name: "Diese Version laden" }).click();
+    await page.getByRole("button", { name: "Diese Version laden" }).first().click();
     await page.waitForFunction((cipher) => JSON.parse(localStorage.getItem("allinone.vault.v1") || "null")?.cipher?.data === cipher, snapshot.cipher.data);
     await page.locator('[data-tab="tasks"]').click();
     await page.getByText("Vor dem Snapshot").waitFor();

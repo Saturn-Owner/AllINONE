@@ -23,3 +23,12 @@ test("VPS metrics calculate CPU from a sample delta and reject malformed output"
   assert.equal(metrics.cpuPercent, 19.999999999999996); assert.equal(metrics.memoryPercent, 75); assert.equal(metrics.diskPercent, 50);
   assert.throws(() => parseMetrics("broken"));
 });
+
+test("Ollama URL prefixes are honored and a cancelled client interrupts upstream work", async () => {
+  let requestedPath; let reached; const accepted = new Promise((r) => { reached = r; });
+  const upstream = createServer((req, res) => { requestedPath = req.url; reached(); }); await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
+  try {
+    const controller = new AbortController(); const work = handleAI({ consent: true, action: "tasks", title: "Test", body: "Notiz" }, { url: `http://127.0.0.1:${upstream.address().port}/ollama` }, controller.signal);
+    const rejected = assert.rejects(work, /nicht erreichbar/); await accepted; assert.equal(requestedPath, "/ollama/api/chat"); controller.abort(); await rejected;
+  } finally { upstream.closeAllConnections(); await new Promise((r) => upstream.close(r)); }
+});

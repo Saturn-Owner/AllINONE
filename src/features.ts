@@ -1,8 +1,12 @@
-import { balance, formatEuro, generatePassword, monthTotals, nextRecurringDate, parseEuro } from "./domain";
+import { clearFormDraft } from "./drafts";
+import { copyWithExpiry } from "./clipboard";
+import { balance, formatEuro, generatePassword, monthTotals, nextRecurringDate, parseEuro, sumCents } from "./domain";
 import type { RecurringPayment, VaultData } from "./vault";
 import { validDate, localDate, reusedPasswords } from "./productivity";
 
 export interface ViewContext {
+  isActive: () => boolean;
+  signal: AbortSignal;
   content: HTMLElement;
   data: VaultData;
   changeData: (update: (data: VaultData) => void) => Promise<void>;
@@ -12,6 +16,7 @@ export interface ViewContext {
 }
 
 let editingPassword: string | null = null;
+let searchedEntry: string | null = null;
 let passwordSearch = "";
 
 function errorMessage(error: unknown): string {
@@ -34,6 +39,7 @@ export function renderPasswords(ctx: ViewContext): void {
       <div class="form-pair"><div><label for="pw-url">Website (HTTPS)</label><input id="pw-url" type="url" placeholder="https://example.com" maxlength="2048" /></div><div><label for="pw-notes">Hinweis</label><input id="pw-notes" maxlength="1000" /></div></div>
       <div class="button-row"><button class="primary" type="submit">${current ? "Änderungen speichern" : "Zugang speichern"}</button><button id="pw-cancel" class="outline-button" type="button">Abbrechen</button></div>
     </form>`;
+  editor.querySelector<HTMLFormElement>("form")!.dataset.draftKey = current?.id || "new";
   editor.querySelector<HTMLInputElement>("#pw-title")!.value = current?.title || "";
   editor.querySelector<HTMLInputElement>("#pw-username")!.value = current?.username || "";
   editor.querySelector<HTMLInputElement>("#pw-password")!.value = current?.password || "";
@@ -42,12 +48,13 @@ export function renderPasswords(ctx: ViewContext): void {
   editor.querySelector<HTMLButtonElement>("#generate-password")!.addEventListener("click", () => {
     editor.querySelector<HTMLInputElement>("#pw-password")!.value = generatePassword();
     editor.querySelector<HTMLInputElement>("#pw-password")!.type = "text";
+    editor.querySelector<HTMLInputElement>("#pw-password")!.dispatchEvent(new Event("input", { bubbles: true }));
   });
   editor.querySelector<HTMLButtonElement>("#toggle-password")!.addEventListener("click", () => {
     const input = editor.querySelector<HTMLInputElement>("#pw-password")!;
     input.type = input.type === "password" ? "text" : "password";
   });
-  editor.querySelector<HTMLButtonElement>("#pw-cancel")!.addEventListener("click", () => { editingPassword = null; ctx.render(); });
+  editor.querySelector<HTMLButtonElement>("#pw-cancel")!.addEventListener("click", () => { clearFormDraft(editor.querySelector<HTMLFormElement>("form")!); editingPassword = null; ctx.render(); });
   editor.querySelector<HTMLFormElement>("form")!.addEventListener("submit", async (event) => {
     event.preventDefault();
     const title = editor.querySelector<HTMLInputElement>("#pw-title")!.value.trim();
@@ -55,14 +62,15 @@ export function renderPasswords(ctx: ViewContext): void {
     const password = editor.querySelector<HTMLInputElement>("#pw-password")!.value;
     const url = editor.querySelector<HTMLInputElement>("#pw-url")!.value.trim();
     const notes = editor.querySelector<HTMLInputElement>("#pw-notes")!.value.trim();
+    const passwordId = current?.id;
     try {
       if (url && new URL(url).protocol !== "https:") throw new Error("Nur HTTPS-Websites sind erlaubt.");
       await ctx.changeData((next) => {
-        const item = next.passwords.find((entry) => entry.id === editingPassword);
+        const item = next.passwords.find((entry) => entry.id === passwordId);
         if (item) Object.assign(item, { title, username, password, url, notes, updatedAt: new Date().toISOString() });
         else next.passwords.push({ id: crypto.randomUUID(), title, username, password, url, notes, updatedAt: new Date().toISOString() });
       });
-      editingPassword = null;
+      if (editingPassword === passwordId) editingPassword = null;
       ctx.render();
     } catch (error) { window.alert(errorMessage(error)); }
   });
@@ -100,6 +108,7 @@ function renderPasswordRows(ctx: ViewContext, rows: HTMLElement): void {
     const secret = ctx.element("span", "secret-value", "••••••••••••");
     const show = ctx.element("button", "outline-button", "Anzeigen");
     let revealTimer = 0;
+    ctx.signal.addEventListener("abort", () => { window.clearTimeout(revealTimer); secret.textContent = "••••••••••••"; }, { once: true });
     show.addEventListener("click", () => {
       window.clearTimeout(revealTimer);
       const revealed = show.textContent === "Anzeigen";
@@ -110,12 +119,7 @@ function renderPasswordRows(ctx: ViewContext, rows: HTMLElement): void {
     const copy = ctx.element("button", "outline-button", "Kopieren");
     copy.addEventListener("click", async () => {
       try {
-        await navigator.clipboard.writeText(item.password);
-        copy.textContent = "Kopiert";
-        window.setTimeout(async () => {
-          try { if (await navigator.clipboard.readText() === item.password) await navigator.clipboard.writeText(""); } catch { /* clipboard permission may be revoked */ }
-          copy.textContent = "Kopieren";
-        }, 30000);
+        await copyWithExpiry(item.password, ctx.signal, copy);
       } catch { window.alert("Zwischenablage nicht verfügbar. HTTPS oder localhost verwenden."); }
     });
     const edit = ctx.element("button", "text-button", "Bearbeiten");
@@ -140,7 +144,7 @@ export function renderFinances(ctx: ViewContext): void {
   const totals = monthTotals(data.transactions, month);
   const summary = element("div", "stats");
   for (const [amount, label] of [
-    [data.accounts.reduce((sum, account) => sum + balance(account, data.transactions), 0), "Gesamtbestand"],
+    [sumCents(data.accounts.map((account) => balance(account, data.transactions))), "Gesamtbestand"],
     [totals.income, "Einnahmen im Monat"],
     [-totals.expenses, "Ausgaben im Monat"]
   ] as const) {
@@ -194,21 +198,25 @@ export function renderFinances(ctx: ViewContext): void {
       const amount = parseEuro(txPanel.querySelector<HTMLInputElement>("#tx-amount")!.value);
       if (!amount) throw new Error("Der Betrag muss größer als null sein.");
       const sign = txPanel.querySelector<HTMLSelectElement>("#tx-kind")!.value === "income" ? 1 : -1;
-      await ctx.changeData((next) => next.transactions.push({
+      const entry = {
         id: crypto.randomUUID(), accountId: accountSelect.value, amountCents: amount * sign,
         date: txPanel.querySelector<HTMLInputElement>("#tx-date")!.value,
         payee: txPanel.querySelector<HTMLInputElement>("#tx-payee")!.value.trim(),
         category: txPanel.querySelector<HTMLInputElement>("#tx-category")!.value.trim(),
         note: txPanel.querySelector<HTMLInputElement>("#tx-note")!.value.trim(), updatedAt: new Date().toISOString()
-      }));
+      };
+      await ctx.changeData((next) => next.transactions.push(entry));
     } catch (error) { window.alert(errorMessage(error)); }
   });
   content.append(txPanel);
 
   const txList = element("section", "panel");
   txList.append(element("h2", "", "Letzte Buchungen"));
-  for (const item of [...data.transactions].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 50)) {
-    const row = element("div", "finance-row");
+  const recent = [...data.transactions].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 50);
+  const found = data.transactions.find((t) => t.id === searchedEntry);
+  if (found && !recent.some((t) => t.id === found.id)) recent.unshift(found);
+  for (const item of recent) {
+    const row = element("div", "finance-row"); row.dataset.entryId = item.id;
     const details = element("div", "credential-info");
     details.append(element("strong", "", item.payee), element("small", "", `${item.date} · ${item.category || "Ohne Kategorie"} · ${data.accounts.find((account) => account.id === item.accountId)?.name || "Gelöschtes Konto"}`));
     row.append(details, element("span", item.amountCents < 0 ? "negative" : "positive", formatEuro(item.amountCents)));
@@ -231,11 +239,12 @@ export function renderFinances(ctx: ViewContext): void {
     try {
       const amount = parseEuro(recurringPanel.querySelector<HTMLInputElement>("#rec-amount")!.value);
       if (!amount) throw new Error("Der Betrag muss größer als null sein.");
-      await ctx.changeData((next) => next.recurring.push({ id: crypto.randomUUID(), accountId: recurringAccount.value,
+      const entry = { id: crypto.randomUUID(), accountId: recurringAccount.value,
         amountCents: amount, dayOfMonth: Number(recurringPanel.querySelector<HTMLInputElement>("#rec-day")!.value),
         payee: recurringPanel.querySelector<HTMLInputElement>("#rec-payee")!.value.trim(),
         category: recurringPanel.querySelector<HTMLInputElement>("#rec-category")!.value.trim(),
-        active: true, subscription: recurringPanel.querySelector<HTMLInputElement>("#rec-subscription")!.checked, cancelBy: recurringPanel.querySelector<HTMLInputElement>("#rec-cancel")!.value, updatedAt: new Date().toISOString() }));
+        active: true, subscription: recurringPanel.querySelector<HTMLInputElement>("#rec-subscription")!.checked, cancelBy: recurringPanel.querySelector<HTMLInputElement>("#rec-cancel")!.value, updatedAt: new Date().toISOString() };
+      await ctx.changeData((next) => next.recurring.push(entry));
     } catch (error) { window.alert(errorMessage(error)); }
   });
   for (const payment of data.recurring) renderRecurringRow(ctx, recurringPanel, payment);
@@ -244,7 +253,7 @@ export function renderFinances(ctx: ViewContext): void {
 }
 
 function renderRecurringRow(ctx: ViewContext, panel: HTMLElement, payment: RecurringPayment): void {
-  const row = ctx.element("div", "finance-row");
+  const row = ctx.element("div", "finance-row"); row.dataset.entryId = payment.id;
   const info = ctx.element("div", "credential-info");
   info.append(ctx.element("strong", "", payment.payee), ctx.element("small", "", `Nächster Termin: ${nextRecurringDate(payment)} · ${ctx.data.accounts.find((account) => account.id === payment.accountId)?.name || "Konto fehlt"}`));
   row.append(info, ctx.element("span", "negative", `−${formatEuro(payment.amountCents)}${payment.active ? "" : " · pausiert"}`));
@@ -260,3 +269,7 @@ function renderRecurringRow(ctx: ViewContext, panel: HTMLElement, payment: Recur
 }
 
 export function openPassword(id: string): void { editingPassword = id; passwordSearch = ""; }
+
+export function resetPasswordEditor(): void { editingPassword = null; passwordSearch = ""; searchedEntry = null; }
+
+export function openFinanceEntry(id: string): void { searchedEntry = id; }

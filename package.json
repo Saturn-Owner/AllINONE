@@ -1,6 +1,6 @@
 {
   "name": "allinone",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "engines": {
@@ -12,13 +12,14 @@
     "preview": "vite preview --host 0.0.0.0",
     "package:linux": "npm run build && python3 scripts/package-preview.py",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
-    "test:ui": "npm run build && node --test tests/ui.test.mjs tests/ui.unlock.test.mjs tests/ui.productivity.test.mjs tests/ui.integrations.test.mjs tests/ui.extension.test.mjs",
+    "test:ui": "npm run build && node --test tests/ui.test.mjs tests/ui.unlock.test.mjs tests/ui.productivity.test.mjs tests/ui.integrations.test.mjs tests/ui.extension.test.mjs tests/ui.review.test.mjs tests/ui.backups.test.mjs",
     "test:ui:server": "npm run build && node --test tests/ui.server.test.mjs",
     "test:ui:drive": "npm run build && node --test tests/ui.drive.test.mjs",
-    "test:server": "node --test tests/server.test.mjs tests/ai.test.mjs",
+    "test:server": "node --test tests/server.test.mjs tests/server.review.test.mjs tests/ai.test.mjs",
     "test:ssh": "node --test tests/ssh.smoke.test.mjs",
     "server": "node server/index.mjs",
-    "server:hash-password": "node server/hash-password.mjs"
+    "server:hash-password": "node server/hash-password.mjs",
+    "test:all": "npm run build && node --test tests/*.test.ts tests/*.test.mjs && python3 -m unittest discover -s tests -p \"test_*.py\""
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

@@ -26,6 +26,8 @@ Aktualisieren: Zuerst die laufende App mit Strg+C beenden, dann:
 Danach mit python3 starten.py erneut starten und die Browserseite neu laden.
 Verwende weiterhin denselben Browser und http://localhost:4175/.
 Dein verschlüsselter Tresor bleibt im Browser erhalten.
+Eine separat installierte Browser-Erweiterung nach dem Update ebenfalls
+neu herunterladen, entpacken und in der Erweiterungsverwaltung neu laden.
 
 Die App öffnet sich im Browser. Falls das nicht automatisch passiert,
 http://localhost:4175/ im Browser öffnen. Das Terminal offen lassen.

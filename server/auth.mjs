@@ -11,8 +11,17 @@ export async function hashPassword(password) {
   return `scrypt$32768$8$1$${salt.toString("base64")}$${hash.toString("base64")}`;
 }
 
+export function validPasswordHash(encoded) {
+  if (typeof encoded !== "string") return false;
+  const parts = encoded.split("$");
+  if (parts.length !== 6 || parts.slice(0, 4).join("$") !== "scrypt$32768$8$1") return false;
+  return [16, 32].every((size, i) => {
+    const value = parts[i + 4]; const bytes = Buffer.from(value, "base64");
+    return bytes.length === size && bytes.toString("base64") === value;
+  });
+}
 export async function verifyPassword(password, encoded) {
-  if (typeof password !== "string" || typeof encoded !== "string") return false;
+  if (typeof password !== "string" || password.length > 4096 || !validPasswordHash(encoded)) return false;
   const parts = encoded.split("$");
   if (parts.length !== 6 || parts.slice(0, 4).join("$") !== "scrypt$32768$8$1") return false;
   const salt = Buffer.from(parts[4], "base64");

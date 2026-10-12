@@ -15,10 +15,10 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
-      Promise.all(keys.filter((key) => key !== CACHE).map((key) => caches.delete(key)))
+      Promise.all(keys.filter((key) => key.startsWith("allinone-shell-") && key !== CACHE).map((key) => caches.delete(key)))
     )
   );
-  self.clients.claim();
+  event.waitUntil(self.clients.claim());
 });
 
 self.addEventListener("fetch", (event) => {
@@ -28,12 +28,12 @@ self.addEventListener("fetch", (event) => {
   if (url.pathname.startsWith("/api/")) return;
 
   if (request.mode === "navigate") {
-    event.respondWith(fetch(request).catch(() => caches.match("/")));
+    event.respondWith(fetch(request).catch(() => caches.open(CACHE).then((cache) => cache.match("/"))));
     return;
   }
 
   event.respondWith(
-    caches.match(url.pathname, { ignoreVary: true }).then((cached) =>
+    caches.open(CACHE).then((cache) => cache.match(request, { ignoreVary: true })).then((cached) =>
       cached || fetch(request).then((response) => {
         if (response.ok) {
           const copy = response.clone();

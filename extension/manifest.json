@@ -1,8 +1,14 @@
 {
   "manifest_version": 3,
   "name": "AllINONE Autofill",
-  "version": "0.2.0",
-  "description": "Verschlüsselte AllINONE-Sicherung entsperren und Zugänge nach Bestätigung ausfüllen.",
-  "permissions": ["activeTab", "scripting"],
-  "action": { "default_popup": "popup.html", "default_title": "AllINONE Autofill" }
+  "version": "0.2.1",
+  "description": "Verschl\u00fcsselte AllINONE-Sicherung entsperren und Zug\u00e4nge nach Best\u00e4tigung ausf\u00fcllen.",
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "AllINONE Autofill"
+  }
 }

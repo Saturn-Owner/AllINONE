@@ -63,6 +63,11 @@ test("local OpenSSH SFTP lists, uploads and downloads within the allowed directo
     const metrics = await response.json();
     assert.ok(metrics.cpuPercent >= 0 && metrics.cpuPercent <= 100);
     assert.ok(metrics.memoryTotal > 0 && metrics.diskTotal > 0);
+    response = await fetch(`${url}/api/hosts/local/download?path=../hello.txt`, { headers: { cookie } }); assert.equal(response.status, 400);
+    await writeFile(join(filesDir, "large.bin"), Buffer.alloc(10_000_001));
+    response = await fetch(`${url}/api/hosts/local/download?path=large.bin`, { headers: { cookie } }); assert.equal(response.status, 413);
+    await symlink(join(filesDir, "hello.txt"), join(filesDir, "inside-link"));
+    response = await fetch(`${url}/api/hosts/local/download?path=inside-link`, { headers: { cookie } }); assert.equal(response.status, 200); assert.equal(await response.text(), "hello world");
     await symlink("/etc/passwd", join(filesDir, "escape"));
     response = await fetch(`${url}/api/hosts/local/download?path=escape`, { headers: { cookie } });
     assert.equal(response.status, 403);

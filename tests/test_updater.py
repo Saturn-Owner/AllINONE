@@ -48,16 +48,25 @@ class UpdaterTest(unittest.TestCase):
         self.temporary.cleanup()
 
     def publish(self, extra=None):
-        content = io.BytesIO()
-        with zipfile.ZipFile(content, "w") as archive:
-            for name, text in {
+        files = {
                 "app/index.html": "new app",
                 "app/assets/new.js": "new code",
                 "starten.py": "new launcher",
                 "aktualisieren.py": "new updater",
                 "SO_STARTET_DIE_APP.txt": "instructions",
-                "version.json": json.dumps({"build": self.build}),
-            }.items():
+            }
+        digest = hashlib.sha256(b"0.2.0\0")
+        for name, value in sorted(files.items()):
+            data = value.encode()
+            digest.update(name.encode() + b"\0" + len(data).to_bytes(8, "big") + data)
+        self.build = digest.hexdigest()
+        files["version.json"] = json.dumps({"version": "0.2.0", "build": self.build})
+        if extra and extra[0] == "AllINONE-Linux-Test/version.json":
+            files["version.json"] = extra[1]
+            extra = None
+        content = io.BytesIO()
+        with zipfile.ZipFile(content, "w") as archive:
+            for name, text in files.items():
                 archive.writestr("AllINONE-Linux-Test/" + name, text)
             if extra:
                 archive.writestr(*extra)
@@ -89,6 +98,22 @@ class UpdaterTest(unittest.TestCase):
         updater.update(self.installation, self.source)
         (self.served / f"downloads/versions/{self.build}.zip").unlink()
         self.assertFalse(updater.update(self.installation, self.source))
+
+    def test_missing_or_modified_app_is_repaired_even_with_current_version(self):
+        self.publish()
+        updater.update(self.installation, self.source)
+        (self.installation / "app/assets/new.js").unlink()
+        self.assertTrue(updater.update(self.installation, self.source))
+        self.assertEqual((self.installation / "app/assets/new.js").read_text(), "new code")
+        (self.installation / "starten.py").write_text("damaged launcher")
+        self.assertTrue(updater.update(self.installation, self.source))
+        self.assertEqual((self.installation / "starten.py").read_text(), "new launcher")
+
+    def test_malformed_archive_metadata_preserves_installation(self):
+        self.publish(("AllINONE-Linux-Test/version.json", "[]"))
+        with self.assertRaisesRegex(ValueError, "Version"):
+            updater.update(self.installation, self.source)
+        self.assert_old_installation()
 
     def test_tampered_download_preserves_installation(self):
         self.publish()

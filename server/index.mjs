@@ -3,13 +3,14 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseEnvelope } from "../src/envelope.ts";
 import { handleAI } from "./ai.mjs";
-import { verifyPassword } from "./auth.mjs";
+import { validPasswordHash, verifyPassword } from "./auth.mjs";
 import { handleHostRequest, loadHosts } from "./ssh.mjs";
 
 const baseDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SESSION_MS = 12 * 60 * 60 * 1000;
-const MAX_SYNC_BYTES = 10_000_000;
+const MAX_SYNC_BYTES = 10_010_000; // encrypted envelope plus revision/JSON wrapper
 
 function json(res, status, value, headers = {}) {
   const body = JSON.stringify(value);
@@ -49,7 +50,7 @@ async function serveStatic(req, res, distDir, path) {
   try {
     const data = await readFile(target);
     const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".png": "image/png", ".webmanifest": "application/manifest+json", ".svg": "image/svg+xml", ".ico": "image/x-icon", ".zip": "application/zip" };
-    res.writeHead(200, { "content-type": `${types[extname(target)]}; charset=utf-8`, "content-length": data.length, "cache-control": extname(target) === ".html" ? "no-cache" : "public, max-age=3600" });
+    res.writeHead(200, { "content-type": `${types[extname(target)]}; charset=utf-8`, "content-length": data.length, "cache-control": (extname(target) === ".html" || target.endsWith("/sw.js")) ? "no-cache" : "public, max-age=3600" });
     res.end(req.method === "HEAD" ? undefined : data);
   } catch { json(res, 404, { error: "Nicht gefunden." }); }
 }
@@ -59,11 +60,20 @@ export function createApp(config) {
   if (!publicOrigin.startsWith("https://") && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(publicOrigin)) {
     throw new Error("PUBLIC_ORIGIN muss HTTPS verwenden (außer localhost).");
   }
-  if (!config.passwordHash) throw new Error("APP_PASSWORD_HASH fehlt.");
+  if (!validPasswordHash(config.passwordHash)) throw new Error("APP_PASSWORD_HASH fehlt oder ist kein gültiger scrypt-Hash. Nutze server:hash-password.");
   const dataDir = resolve(config.dataDir);
   const distDir = resolve(config.distDir || resolve(baseDir, "dist"));
   const sessions = new Map();
   const attempts = new Map();
+  const pendingLogins = new Set();
+  let aiRequests = 0;
+  let hostRequests = 0;
+  let lastCleanup = 0;
+  const cleanup = () => {
+    const now = Date.now(); if (now - lastCleanup < 30000) return; lastCleanup = now;
+    for (const [token, expires] of sessions) if (expires <= now) sessions.delete(token);
+    for (const [address, entry] of attempts) if (entry.until <= now && now - entry.lastFailure > 15 * 60 * 1000) attempts.delete(address);
+  };
   let syncQueue = Promise.resolve();
   const locked = (fn) => {
     const result = syncQueue.then(fn);
@@ -78,6 +88,7 @@ export function createApp(config) {
     res.setHeader("permissions-policy", "camera=(), microphone=(), geolocation=()");
     res.setHeader("content-security-policy", "default-src 'self'; script-src 'self' https://accounts.google.com; style-src 'self'; img-src 'self' data:; connect-src 'self' https://www.googleapis.com https://accounts.google.com; frame-src https://accounts.google.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
     try {
+      cleanup();
       const url = new URL(req.url || "/", publicOrigin);
       if (!url.pathname.startsWith("/api/")) return await serveStatic(req, res, distDir, url.pathname);
       if (["POST", "PUT", "PATCH", "DELETE"].includes(req.method) && req.headers.origin !== publicOrigin) {
@@ -85,21 +96,29 @@ export function createApp(config) {
       }
       if (url.pathname === "/api/login" && req.method === "POST") {
         const address = req.socket.remoteAddress || "unknown";
-        const entry = attempts.get(address) || { count: 0, until: 0 };
-        if (entry.until > Date.now()) return json(res, 429, { error: "Zu viele Anmeldeversuche." });
-        const payload = await bodyJson(req, 4096);
-        const valid = await verifyPassword(payload.password, config.passwordHash);
-        if (!valid) {
-          entry.count++;
-          if (entry.count >= 5) { entry.until = Date.now() + 15 * 60 * 1000; entry.count = 0; }
-          attempts.set(address, entry);
-          return json(res, 401, { error: "Anmeldung fehlgeschlagen." });
-        }
-        attempts.delete(address);
-        const token = randomBytes(32).toString("base64url");
-        sessions.set(token, Date.now() + SESSION_MS);
-        const secure = publicOrigin.startsWith("https://") ? "; Secure" : "";
-        return json(res, 200, { authenticated: true }, { "set-cookie": `aio_session=${token}; HttpOnly; SameSite=Strict; Path=/api; Max-Age=43200${secure}` });
+        if (pendingLogins.has(address) || pendingLogins.size >= 4) { req.resume(); return json(res, 429, { error: "Eine Anmeldung läuft bereits. Bitte kurz warten." }); }
+        pendingLogins.add(address);
+        try {
+          const entry = attempts.get(address) || { count: 0, until: 0, lastFailure: Date.now() };
+          if (entry.until > Date.now()) { req.resume(); return json(res, 429, { error: "Zu viele Anmeldeversuche." }); }
+          if (attempts.size >= 10000 && !attempts.has(address)) { req.resume(); return json(res, 429, { error: "Zu viele Anmeldeversuche." }); }
+          const payload = await bodyJson(req, 4096);
+          if (!payload || typeof payload !== "object" || typeof payload.password !== "string") return json(res, 400, { error: "Ungültige Anmeldung." });
+          const valid = await verifyPassword(payload.password, config.passwordHash);
+          if (!valid) {
+            entry.count++; entry.lastFailure = Date.now();
+            if (entry.count >= 5) { entry.until = Date.now() + 15 * 60 * 1000; entry.count = 0; }
+            attempts.set(address, entry);
+            return json(res, 401, { error: "Anmeldung fehlgeschlagen." });
+          }
+          attempts.delete(address);
+          sessions.delete(getCookie(req, "aio_session"));
+          if (sessions.size >= 256) sessions.delete(sessions.keys().next().value);
+          const token = randomBytes(32).toString("base64url");
+          sessions.set(token, Date.now() + SESSION_MS);
+          const secure = publicOrigin.startsWith("https://") ? "; Secure" : "";
+          return json(res, 200, { authenticated: true }, { "set-cookie": `aio_session=${token}; HttpOnly; SameSite=Strict; Path=/api; Max-Age=43200${secure}` });
+        } finally { pendingLogins.delete(address); }
       }
       if (url.pathname === "/api/session" && req.method === "GET") {
         const expires = sessions.get(getCookie(req, "aio_session"));
@@ -110,7 +129,7 @@ export function createApp(config) {
       if (!expires || expires <= Date.now()) { sessions.delete(token); return json(res, 401, { error: "Anmeldung erforderlich." }); }
       if (url.pathname === "/api/logout" && req.method === "POST") {
         sessions.delete(token);
-        return json(res, 200, { authenticated: false }, { "set-cookie": "aio_session=; HttpOnly; SameSite=Strict; Path=/api; Max-Age=0" });
+        return json(res, 200, { authenticated: false }, { "set-cookie": `aio_session=; HttpOnly; SameSite=Strict; Path=/api; Max-Age=0${publicOrigin.startsWith("https://") ? "; Secure" : ""}` });
       }
       if (url.pathname === "/api/sync" && req.method === "GET") {
         let current = null;
@@ -120,10 +139,13 @@ export function createApp(config) {
       }
       if (url.pathname === "/api/sync" && req.method === "PUT") {
         const payload = await bodyJson(req, MAX_SYNC_BYTES);
-        if ((payload.revision !== null && typeof payload.revision !== "string") || !payload.envelope
+        if (!payload || typeof payload !== "object" || (payload.revision !== null && (typeof payload.revision !== "string" || payload.revision.length > 128)) || !payload.envelope
           || payload.envelope.version !== 1 || typeof payload.envelope.cipher?.data !== "string") {
           return json(res, 400, { error: "Ungültige Tresordaten." });
         }
+        let checkedEnvelope;
+        try { checkedEnvelope = parseEnvelope(JSON.stringify(payload.envelope)); }
+        catch { return json(res, 400, { error: "Ungültige Tresordaten." }); }
         const result = await locked(async () => {
           await mkdir(dataDir, { recursive: true, mode: 0o700 });
           const path = resolve(dataDir, "vault.json");
@@ -133,19 +155,32 @@ export function createApp(config) {
           if (payload.revision !== (current?.revision || null)) return { conflict: true, revision: current?.revision || null };
           const revision = randomUUID();
           const temp = resolve(dataDir, `.vault-${revision}.tmp`);
-          await writeFile(temp, JSON.stringify({ revision, envelope: payload.envelope }), { mode: 0o600, flag: "wx" });
+          await writeFile(temp, JSON.stringify({ revision, envelope: checkedEnvelope }), { mode: 0o600, flag: "wx" });
           await rename(temp, path);
           return { revision };
         });
         return result.conflict ? json(res, 409, { error: "Synchronisationskonflikt.", revision: result.revision }) : json(res, 200, result);
       }
-      if (url.pathname === "/api/ai" && req.method === "POST") return json(res, 200, await handleAI(await bodyJson(req, 420000), config.ai));
-      if (url.pathname.startsWith("/api/hosts")) return await handleHostRequest(req, res, url, config.hosts || [], bodyBuffer, json);
+      if (url.pathname === "/api/ai" && req.method === "POST") {
+        if (aiRequests >= 2) { req.resume(); return json(res, 429, { error: "KI ist beschäftigt. Bitte kurz warten." }); }
+        aiRequests++;
+        const controller = new AbortController(); const disconnected = () => { if (!res.writableEnded) controller.abort(); };
+        res.once("close", disconnected);
+        try { return json(res, 200, await handleAI(await bodyJson(req, 420000), config.ai, controller.signal)); }
+        finally { res.removeListener("close", disconnected); aiRequests--; }
+      }
+      if (url.pathname.startsWith("/api/hosts")) {
+        if (hostRequests >= 4) { req.resume(); return json(res, 429, { error: "Zu viele parallele SSH-Vorgänge." }); }
+        hostRequests++;
+        try { return await handleHostRequest(req, res, url, config.hosts || [], bodyBuffer, json); }
+        finally { hostRequests--; }
+      }
       return json(res, 404, { error: "Nicht gefunden." });
     } catch (error) {
-      json(res, error.status || 500, { error: error.status ? error.message : "Serverfehler." });
+      if (!res.headersSent && !res.destroyed) json(res, error?.status || 500, { error: error?.status ? error.message : "Serverfehler." });
     }
   });
+  server.requestTimeout = 30000; server.headersTimeout = 15000;
   return server;
 }
 

@@ -1,4 +1,5 @@
-import type { ConnectContext } from "./connect";
+import { runServerSync, type ConnectContext } from "./connect";
+import { vaultEpoch, assertVaultEpoch, vaultSignal } from "./lifecycle";
 import { getServerVault, putServerVault } from "./remote";
 import { unlockVault, parseEnvelope, type VaultData, type VaultEnvelope } from "./vault";
 import { saveBackup } from "./backups";
@@ -7,7 +8,7 @@ export async function renderConflictResolver(ctx: ConnectContext, passphrase: st
   const panel = el("section", "panel conflict-panel"); const feedback = el("p", "message"); panel.append(el("h2", "", "Synchronisationskonflikt lösen"), feedback); ctx.content.append(panel);
   try {
     if (!passphrase) throw new Error("Gib oben die Passphrase des Server-Tresors ein, um Versionen zu vergleichen.");
-    const remote = await getServerVault(); if (!remote.envelope) throw new Error("Auf dem Server liegt kein Tresor.");
+    const remote = await getServerVault(ctx.signal); if (!remote.envelope) throw new Error("Auf dem Server liegt kein Tresor.");
     const { data: serverData } = await unlockVault(remote.envelope, passphrase);
     if (!panel.isConnected) return;
     const localRaw = JSON.stringify(ctx.envelope);
@@ -36,7 +37,8 @@ export async function renderConflictResolver(ctx: ConnectContext, passphrase: st
     }
     const prefs = el("select"); prefs.setAttribute("aria-label", "Einstellungen bei Konflikt"); prefs.add(new Option("Lokale Einstellungen behalten", "local")); prefs.add(new Option("Server-Einstellungen übernehmen", "remote")); panel.append(prefs);
     const apply = el("button", "primary", "Auswahl zusammenführen & synchronisieren");
-    apply.onclick = async () => { apply.disabled = true; try {
+    apply.onclick = async () => { apply.disabled = true; const expectedEpoch = vaultEpoch(); try { await runServerSync(async () => {
+      assertVaultEpoch(expectedEpoch);
       if (localStorage.getItem("allinone.vault.v1") !== localRaw) throw new Error("Lokale Daten haben sich geändert. Öffne den Vergleich erneut.");
       await saveBackup(localRaw); await saveBackup(JSON.stringify(remote.envelope));
       if (!panel.isConnected || localStorage.getItem("allinone.vault.v1") !== localRaw) throw new Error("Ansicht oder Tresor geändert. Öffne den Vergleich erneut.");
@@ -50,10 +52,11 @@ export async function renderConflictResolver(ctx: ConnectContext, passphrase: st
       if (prefs.value === "remote") { if (serverData.preferences) merged.preferences = serverData.preferences; else delete merged.preferences; }
       const accountIds = new Set(merged.accounts.map((a) => a.id));
       if ([...merged.transactions, ...merged.recurring].some((t) => !accountIds.has(t.accountId))) throw new Error("Eine Buchung oder Zahlung braucht ein entferntes Konto. Behalte das Konto oder entferne die zugehörigen Einträge.");
-      await ctx.changeData((d) => Object.assign(d, merged));
+      await ctx.changeData((d) => { Object.assign(d, merged); if (!merged.preferences) delete d.preferences; });
+      assertVaultEpoch(expectedEpoch);
       const envelope = parseEnvelope(localStorage.getItem("allinone.vault.v1")!);
-      const revision = await putServerVault(remote.revision, envelope); await baseline(revision, envelope); ctx.render();
-    } catch (e) { if (!feedback.isConnected) window.alert(e instanceof Error ? e.message : "Konflikt bleibt bestehen. Lokaler Stand ist gespeichert."); else feedback.textContent = e instanceof Error ? e.message : "Konflikt konnte nicht gelöst werden."; apply.disabled = false; } };
+      const revision = await putServerVault(remote.revision, envelope, vaultSignal()); await baseline(revision, envelope); ctx.render();
+    }); } catch (e) { if (!feedback.isConnected) window.alert(e instanceof Error ? e.message : "Konflikt bleibt bestehen. Lokaler Stand ist gespeichert."); else feedback.textContent = e instanceof Error ? e.message : "Konflikt konnte nicht gelöst werden."; apply.disabled = false; } };
     panel.append(apply); panel.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (e) { feedback.textContent = e instanceof Error ? e.message : "Vergleich fehlgeschlagen."; feedback.className = "message error"; }
 }

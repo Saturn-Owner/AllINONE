@@ -3,6 +3,10 @@ import {
   getHostMetrics, getServerVault, listDriveSnapshots, listHostFiles, putServerVault, serverLogin, serverLogout, serverSession,
   uploadDriveSnapshot, uploadHostFile, type DriveSnapshot, type HostInfo, type RemoteFile
 } from "./remote";
+import { assertVaultEpoch, vaultEpoch, vaultSignal, onVaultEnd } from "./lifecycle";
+import { disconnectDrive } from "./remote";
+import { withVaultLock } from "./storage";
+import { hasDrafts } from "./drafts";
 import type { ViewContext } from "./features";
 import { saveBackup } from "./backups";
 import { renderConflictResolver } from "./sync-conflicts";
@@ -17,10 +21,12 @@ export interface ConnectContext extends ViewContext {
 let serverAuthenticated = false;
 const REVISION_KEY = "allinone.serverRevision.v1";
 const BASE_KEY = "allinone.serverBase.v1";
-let serverRevision: string | null | undefined = localStorage.getItem(REVISION_KEY) || undefined;
+const GENERATION_KEY = "allinone.serverGeneration.v1";
+export function getServerSyncGeneration(): string { return localStorage.getItem(GENERATION_KEY) || ""; }
 let syncMessage = "";
 let uploadTimer = 0;
-let uploadQueue = Promise.resolve();
+let syncQueue = Promise.resolve();
+let syncEpoch = 0;
 let snapshots: DriveSnapshot[] = [];
 let hosts: HostInfo[] = [];
 let selectedHost = "";
@@ -32,7 +38,7 @@ let sessionChecked = false;
 function checkSession(ctx: ConnectContext): void {
   if (sessionChecked) return;
   sessionChecked = true;
-  serverSession().then((active) => { if (active) { serverAuthenticated = true; ctx.render(); } }).catch(() => undefined);
+  serverSession(ctx.signal).then((active) => { if (ctx.isActive()) { serverAuthenticated = active; if (active && !hasDrafts()) ctx.render(); } }).catch(() => { sessionChecked = false; });
 }
 
 function message(error: unknown): string { return error instanceof Error ? error.message : "Vorgang fehlgeschlagen."; }
@@ -43,58 +49,75 @@ async function envelopeHash(envelope: VaultEnvelope): Promise<string> {
   return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-async function setServerBaseline(revision: string | null, envelope: VaultEnvelope): Promise<void> {
-  serverRevision = revision;
-  if (revision) localStorage.setItem(REVISION_KEY, revision);
-  else localStorage.removeItem(REVISION_KEY);
-  localStorage.setItem(BASE_KEY, await envelopeHash(envelope));
-  syncMessage = "Mit eigenem Server synchronisiert.";
+export function runServerSync<T>(operation: () => Promise<T>): Promise<T> {
+  const next = syncQueue.then(async () => await navigator.locks.request("allinone-server-sync", operation));
+  syncQueue = next.then(() => undefined, () => undefined);
+  return next;
 }
-
-export function clearServerBaseline(): void {
-  syncMessage = "Lokal gespeichert";
-  serverRevision = undefined;
-  localStorage.removeItem(REVISION_KEY);
-  localStorage.removeItem(BASE_KEY);
-}
-
-async function uploadCurrent(): Promise<void> {
-  if (!serverAuthenticated || !serverRevision) return;
-  const raw = localStorage.getItem("allinone.vault.v1");
-  if (!raw) return;
-  const envelope = parseEnvelope(raw);
+async function setServerBaseline(revision: string | null, envelope: VaultEnvelope, generation = getServerSyncGeneration()): Promise<void> {
+  const expectedEpoch = vaultEpoch(), expectedSync = syncEpoch;
   const hash = await envelopeHash(envelope);
+  await withVaultLock(() => {
+    assertVaultEpoch(expectedEpoch);
+    if (syncEpoch !== expectedSync || getServerSyncGeneration() !== generation) throw new Error("Synchronisation zwischenzeitlich zurückgesetzt.");
+    const raw = localStorage.getItem("allinone.vault.v1");
+    if (!raw || parseEnvelope(raw).kdf.salt !== envelope.kdf.salt) throw new Error("Der lokale Tresor wurde gewechselt. Bitte erneut koppeln.");
+    if (revision) localStorage.setItem(REVISION_KEY, revision); else localStorage.removeItem(REVISION_KEY);
+    localStorage.setItem(BASE_KEY, hash); syncMessage = "Mit eigenem Server synchronisiert.";
+  });
+}
+export function clearServerBaseline(): void {
+  syncEpoch++; window.clearTimeout(uploadTimer);
+  localStorage.setItem(GENERATION_KEY, crypto.randomUUID());
+  syncMessage = "Lokal gespeichert";
+  localStorage.removeItem(REVISION_KEY); localStorage.removeItem(BASE_KEY);
+}
+async function uploadCurrent(): Promise<void> {
+  const expectedEpoch = vaultEpoch(), expectedSync = syncEpoch, generation = getServerSyncGeneration();
+  const revision = localStorage.getItem(REVISION_KEY);
+  if (!serverAuthenticated || !revision) return;
+  const raw = localStorage.getItem("allinone.vault.v1"); if (!raw) return;
+  const envelope = parseEnvelope(raw); const hash = await envelopeHash(envelope);
   if (hash === localStorage.getItem(BASE_KEY)) return;
   try {
-    const revision = await putServerVault(serverRevision, envelope);
-    await setServerBaseline(revision, envelope);
+    const nextRevision = await putServerVault(revision, envelope, vaultSignal());
+    assertVaultEpoch(expectedEpoch); if (syncEpoch !== expectedSync) return;
+    await setServerBaseline(nextRevision, envelope, generation);
     const latest = localStorage.getItem("allinone.vault.v1");
     if (latest && await envelopeHash(parseEnvelope(latest)) !== hash) scheduleServerSync();
-  } catch (error) {
-    syncMessage = `Automatische Synchronisation pausiert: ${message(error)}`;
-  }
+  } catch (error) { if (vaultEpoch() === expectedEpoch && syncEpoch === expectedSync) syncMessage = `Automatische Synchronisation pausiert: ${message(error)}`; }
 }
-
 export function scheduleServerSync(): void {
-  if (!serverAuthenticated || !serverRevision) return;
+  if (!serverAuthenticated || !localStorage.getItem(REVISION_KEY)) return;
   window.clearTimeout(uploadTimer);
-  uploadTimer = window.setTimeout(() => { uploadQueue = uploadQueue.then(uploadCurrent).catch((error) => { syncMessage = message(error); }); }, 2500);
+  uploadTimer = window.setTimeout(() => { void runServerSync(uploadCurrent).catch((error) => { syncMessage = message(error); }); }, 2500);
 }
-
-export async function pollServerSync(envelope: VaultEnvelope, key: CryptoKey, replace: (remote: VaultEnvelope, data: VaultData) => boolean): Promise<void> {
-  if (!serverRevision) return;
-  try {
-    serverAuthenticated = await serverSession();
-    if (!serverAuthenticated) return;
-    await uploadQueue;
-    if (await envelopeHash(envelope) !== localStorage.getItem(BASE_KEY)) { scheduleServerSync(); return; }
-    const remote = await getServerVault();
-    if (remote.revision === serverRevision || !remote.envelope) return;
-    const data = await decryptVaultWithKey(remote.envelope, key, envelope.kdf.salt);
-    if (replace(remote.envelope, data)) await setServerBaseline(remote.revision, remote.envelope);
-    else syncMessage = "Lokale Änderungen erkannt. Bitte Synchronisationskonflikt prüfen.";
-  } catch (error) { syncMessage = `Automatische Synchronisation pausiert: ${message(error)}`; }
+export async function pollServerSync(envelope: VaultEnvelope, key: CryptoKey, replace: (remote: VaultEnvelope, data: VaultData) => Promise<boolean>): Promise<void> {
+  const expectedEpoch = vaultEpoch(), expectedSync = syncEpoch, generation = getServerSyncGeneration();
+  if (!localStorage.getItem(REVISION_KEY)) return;
+  await runServerSync(async () => {
+    try {
+      assertVaultEpoch(expectedEpoch); if (syncEpoch !== expectedSync) return;
+      serverAuthenticated = await serverSession(vaultSignal());
+      if (!serverAuthenticated) { syncMessage = "Server-Anmeldung abgelaufen. Bitte erneut verbinden."; sessionChecked = false; return; }
+      if (await envelopeHash(envelope) !== localStorage.getItem(BASE_KEY)) { scheduleServerSync(); return; }
+      const remote = await getServerVault(vaultSignal());
+      if (remote.revision === localStorage.getItem(REVISION_KEY) || !remote.envelope) return;
+      const data = await decryptVaultWithKey(remote.envelope, key, envelope.kdf.salt);
+      assertVaultEpoch(expectedEpoch); if (syncEpoch !== expectedSync) return;
+      if (await replace(remote.envelope, data)) await setServerBaseline(remote.revision, remote.envelope, generation);
+      else syncMessage = "Lokale Änderungen erkannt. Bitte Synchronisationskonflikt prüfen.";
+    } catch (error) { if (vaultEpoch() === expectedEpoch && syncEpoch === expectedSync) syncMessage = `Automatische Synchronisation pausiert: ${message(error)}`; }
+  });
 }
+function registerSessionCleanup(): void {
+  onVaultEnd(() => {
+    syncEpoch++; window.clearTimeout(uploadTimer); disconnectDrive();
+    snapshots = []; hosts = []; selectedHost = ""; currentPath = ""; files = []; statusOutput = "";
+    sessionChecked = false; registerSessionCleanup();
+  });
+}
+registerSessionCleanup();
 
 export function renderSync(ctx: ConnectContext): void {
   checkSession(ctx);
@@ -111,9 +134,9 @@ export function renderSync(ctx: ConnectContext): void {
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
-        await serverLogin(form.querySelector<HTMLInputElement>("input")!.value);
+        await serverLogin(form.querySelector<HTMLInputElement>("input")!.value, ctx.signal);
+        if (!ctx.isActive()) return;
         serverAuthenticated = true;
-        serverRevision = localStorage.getItem(REVISION_KEY) || undefined;
         ctx.render();
       } catch (error) { feedback.textContent = message(error); feedback.className = "message error"; }
     });
@@ -129,34 +152,43 @@ export function renderSync(ctx: ConnectContext): void {
     const actions = element("div", "button-row wrap");
     const push = element("button", "primary", "Verschlüsselten Tresor hochladen");
     push.addEventListener("click", async () => {
+      push.disabled = true;
+      const generation = getServerSyncGeneration();
       try {
-        if (serverRevision === undefined) {
-          const remote = await getServerVault();
-          if (remote.revision) throw new Error("Auf dem Server liegt bereits ein Tresor. Lade ihn zuerst herunter, um Überschreiben zu verhindern.");
-          serverRevision = null;
-        }
-        const revision = await putServerVault(serverRevision, ctx.envelope);
-        await setServerBaseline(revision, ctx.envelope);
-        feedback.textContent = "Verschlüsselter Tresor auf dem Server gespeichert.";
-        feedback.className = "message";
+        await runServerSync(async () => {
+          if (!ctx.isActive()) throw new Error("Ansicht geändert. Bitte erneut versuchen.");
+          let revision = localStorage.getItem(REVISION_KEY);
+          if (!revision) { const remote = await getServerVault(ctx.signal); if (remote.revision) throw new Error("Auf dem Server liegt bereits ein Tresor. Lade ihn zuerst herunter, um Überschreiben zu verhindern."); }
+          const envelope = parseEnvelope(localStorage.getItem("allinone.vault.v1")!);
+          const nextRevision = await putServerVault(revision, envelope, ctx.signal);
+          if (!ctx.isActive()) return;
+          await setServerBaseline(nextRevision, envelope, generation);
+          feedback.textContent = "Verschlüsselter Tresor auf dem Server gespeichert."; feedback.className = "message";
+        });
       } catch (error) { feedback.textContent = message(error); feedback.className = "message error"; }
+      finally { push.disabled = false; }
     });
     const pull = element("button", "outline-button", "Vom Server herunterladen");
     pull.addEventListener("click", async () => {
+      const passphrase = passInput.value; pull.disabled = true;
       try {
-        if (!passInput.value) throw new Error("Gib die Passphrase des entfernten Tresors ein.");
-        const remote = await getServerVault();
-        if (!remote.envelope) throw new Error("Auf dem Server liegt noch kein Tresor.");
-        if (!window.confirm("Lokale Daten durch den Server-Tresor ersetzen? Exportiere vorher eine Sicherung, falls du lokale Änderungen behalten möchtest.")) return;
-        await ctx.replaceVault(remote.envelope, passInput.value);
-        await setServerBaseline(remote.revision, remote.envelope);
+        if (!passphrase) throw new Error("Gib die Passphrase des entfernten Tresors ein.");
+        await runServerSync(async () => {
+          if (!ctx.isActive()) throw new Error("Ansicht geändert. Bitte erneut versuchen.");
+          const remote = await getServerVault(ctx.signal);
+          if (!remote.envelope) throw new Error("Auf dem Server liegt noch kein Tresor.");
+          if (!ctx.isActive() || !window.confirm("Lokale Daten durch den Server-Tresor ersetzen? Exportiere vorher eine Sicherung, falls du lokale Änderungen behalten möchtest.")) return;
+          await ctx.replaceVault(remote.envelope, passphrase);
+          await setServerBaseline(remote.revision, remote.envelope);
+        });
       } catch (error) { feedback.textContent = message(error); feedback.className = "message error"; }
+      finally { pull.disabled = false; }
     });
     const logout = element("button", "outline-button", "Server abmelden");
-    logout.addEventListener("click", async () => { try { await serverLogout(); serverAuthenticated = false; serverRevision = undefined; syncMessage = "Server abgemeldet · lokal gespeichert"; ctx.render(); } catch (error) { feedback.textContent = message(error); } });
+    logout.addEventListener("click", async () => { try { await runServerSync(() => serverLogout(ctx.signal)); syncEpoch++; window.clearTimeout(uploadTimer); serverAuthenticated = false; syncMessage = "Server abgemeldet · lokal gespeichert"; ctx.render(); } catch (error) { feedback.textContent = message(error); } });
     actions.append(push, pull, logout);
     const resolve = element("button", "outline-button", "Versionen vergleichen / Konflikt lösen");
-    resolve.onclick = () => void renderConflictResolver(ctx, passInput.value, async (revision, envelope) => { await setServerBaseline(revision, envelope); });
+    resolve.onclick = () => { const generation = getServerSyncGeneration(); void renderConflictResolver(ctx, passInput.value, async (revision, envelope) => { await setServerBaseline(revision, envelope, generation); }); };
     actions.append(resolve);
     server.append(passLabel, passInput, actions);
   }
@@ -187,16 +219,16 @@ export function renderSync(ctx: ConnectContext): void {
   } else if (!driveConnected()) {
     const connect = element("button", "primary", "Google Drive verbinden");
     connect.addEventListener("click", async () => {
-      try { await connectDrive(clientId); snapshots = await listDriveSnapshots(); ctx.render(); }
+      try { await connectDrive(clientId, ctx.signal); if (!ctx.isActive()) { disconnectDrive(); return; } snapshots = await listDriveSnapshots(ctx.signal); ctx.render(); }
       catch (error) { driveFeedback.textContent = message(error); driveFeedback.className = "message error"; }
     });
     drive.append(connect);
   } else {
     const refresh = element("button", "outline-button", "Versionen aktualisieren");
-    refresh.addEventListener("click", async () => { try { snapshots = await listDriveSnapshots(); ctx.render(); } catch (error) { driveFeedback.textContent = message(error); } });
+    refresh.addEventListener("click", async () => { try { snapshots = await listDriveSnapshots(ctx.signal); ctx.render(); } catch (error) { driveFeedback.textContent = message(error); } });
     const upload = element("button", "primary", "Verschlüsselte Version hochladen");
     upload.addEventListener("click", async () => {
-      try { await uploadDriveSnapshot(ctx.envelope); snapshots = await listDriveSnapshots(); ctx.render(); }
+      try { await uploadDriveSnapshot(ctx.envelope, ctx.signal); snapshots = await listDriveSnapshots(ctx.signal); ctx.render(); }
       catch (error) { driveFeedback.textContent = message(error); driveFeedback.className = "message error"; }
     });
     const actions = element("div", "button-row wrap"); actions.append(upload, refresh); drive.append(actions);
@@ -211,9 +243,11 @@ export function renderSync(ctx: ConnectContext): void {
       restore.addEventListener("click", async () => {
         try {
           if (!passInput.value) throw new Error("Gib die Passphrase der Version ein.");
-          const envelope = await downloadDriveSnapshot(snapshot.id);
+          const passphrase = passInput.value;
+          const envelope = await downloadDriveSnapshot(snapshot.id, ctx.signal);
+          if (!ctx.isActive()) return;
           if (!window.confirm("Lokale Daten durch diese Drive-Version ersetzen? Sichere lokale Änderungen vorher.")) return;
-          await ctx.replaceVault(envelope, passInput.value);
+          await ctx.replaceVault(envelope, passphrase);
           clearServerBaseline();
         } catch (error) { driveFeedback.textContent = message(error); driveFeedback.className = "message error"; }
       });
@@ -240,7 +274,7 @@ export function renderServers(ctx: ConnectContext): void {
   const feedback = element("p", "message", "");
   const refresh = element("button", "outline-button", "Hostliste laden");
   refresh.addEventListener("click", async () => {
-    try { hosts = await getHosts(); selectedHost = hosts[0]?.id || ""; files = []; statusOutput = ""; ctx.render(); }
+    try { const loaded = await getHosts(ctx.signal); if (!ctx.isActive()) return; hosts = loaded; selectedHost = hosts[0]?.id || ""; files = []; statusOutput = ""; ctx.render(); }
     catch (error) { feedback.textContent = message(error); feedback.className = "message error"; }
   });
   panel.append(element("h2", "", "Freigegebene Hosts"), refresh);
@@ -254,7 +288,7 @@ export function renderServers(ctx: ConnectContext): void {
     panel.append(select);
     const statusButton = element("button", "outline-button", "Status abrufen");
     statusButton.addEventListener("click", async () => {
-      try { statusOutput = (await getHostStatus(selectedHost)).output; ctx.render(); }
+      try { const output = (await getHostStatus(selectedHost, ctx.signal)).output; if (!ctx.isActive()) return; statusOutput = output; ctx.render(); }
       catch (error) { feedback.textContent = message(error); feedback.className = "message error"; }
     });
     panel.append(statusButton);
@@ -263,10 +297,12 @@ export function renderServers(ctx: ConnectContext): void {
     const metrics = element("div"); monitor.append(metrics); panel.append(monitor);
     const hostId = selectedHost;
     let wasWarning = false;
+    let monitorTimer = 0;
+    ctx.signal.addEventListener("abort", () => window.clearTimeout(monitorTimer), { once: true });
     const check = async () => {
       if (!panel.isConnected) return;
       try {
-        const m = await getHostMetrics(hostId); if (!panel.isConnected) return;
+        const m = await getHostMetrics(hostId, ctx.signal); metrics.className = ""; if (!panel.isConnected) return;
         metrics.replaceChildren();
         for (const [label, value] of [["CPU", m.cpuPercent], ["RAM", m.memoryPercent], ["Speicher /", m.diskPercent]] as const) { const row = element("div", "budget-row"); row.append(element("strong", value >= 90 ? "negative" : "", `${label}: ${value.toFixed(1)} %`)); const bar = element("progress"); bar.max = 100; bar.value = value; bar.setAttribute("aria-label", label); row.append(bar); metrics.append(row); }
         const gib = (bytes: number) => (bytes / 1024 ** 3).toFixed(1);
@@ -275,10 +311,10 @@ export function renderServers(ctx: ConnectContext): void {
         if (warning) metrics.append(element("p", "security-notice", "Hohe Auslastung: Mindestens ein Wert erreicht 90 %."));
         if (warning && !wasWarning) notifyHost(`${hosts.find((h) => h.id === hostId)?.label || hostId}: hohe Auslastung`); wasWarning = warning;
       } catch (e) { if (panel.isConnected) { metrics.textContent = `VPS nicht erreichbar oder Monitoring nicht verfügbar: ${message(e)}`; metrics.className = "message error"; if (!wasWarning) notifyHost(`${hostId}: Verbindung fehlgeschlagen`); wasWarning = true; } }
-      if (panel.isConnected) window.setTimeout(check, 60_000);
+      if (panel.isConnected) monitorTimer = window.setTimeout(check, 60_000);
     };
-    const notifyHost = (body: string) => { if (ctx.data.preferences?.notifications && "Notification" in window && Notification.permission === "granted") void navigator.serviceWorker.ready.then((r) => r.showNotification("AllINONE · VPS", { body, tag: `vps-${hostId}` })).catch(() => undefined); };
-    window.setTimeout(check, 0);
+    const notifyHost = (body: string) => { if (ctx.data.preferences?.notifications && "Notification" in window && Notification.permission === "granted") void navigator.serviceWorker.ready.then((r) => { if (ctx.isActive()) return r.showNotification("AllINONE · VPS", { body, tag: `vps-${hostId}` }); }).catch(() => undefined); };
+    monitorTimer = window.setTimeout(check, 0);
     monitor.append(element("p", "hint", "Aktualisiert jede Minute, solange diese VPS-Ansicht geöffnet und entsperrt ist. Linux-Hosts erforderlich. Verbindungen sind serverseitig gespeichert."));
     const pathLabel = element("label", "", "Pfad innerhalb des freigegebenen Verzeichnisses");
     pathLabel.htmlFor = "server-path";
@@ -286,7 +322,7 @@ export function renderServers(ctx: ConnectContext): void {
     pathInput.id = "server-path"; pathInput.value = currentPath; pathInput.placeholder = "z. B. backups";
     const list = element("button", "outline-button", "Dateien anzeigen");
     const load = async (path: string) => {
-      try { files = await listHostFiles(selectedHost, path); currentPath = path; ctx.render(); }
+      try { const loaded = await listHostFiles(selectedHost, path, ctx.signal); if (!ctx.isActive()) return; files = loaded; currentPath = path; ctx.render(); }
       catch (error) { feedback.textContent = message(error); feedback.className = "message error"; }
     };
     list.addEventListener("click", () => load(pathInput.value));
@@ -302,7 +338,7 @@ export function renderServers(ctx: ConnectContext): void {
       const action = element("button", "text-button", file.directory ? "Öffnen" : "Herunterladen");
       action.addEventListener("click", async () => {
         const path = [currentPath, file.name].filter(Boolean).join("/");
-        try { if (file.directory) await load(path); else await downloadHostFile(selectedHost, path); }
+        try { if (file.directory) await load(path); else await downloadHostFile(selectedHost, path, ctx.signal); }
         catch (error) { feedback.textContent = message(error); feedback.className = "message error"; }
       });
       row.append(action); panel.append(row);
@@ -312,7 +348,7 @@ export function renderServers(ctx: ConnectContext): void {
     uploadInput.type = "file"; uploadInput.className = "visually-hidden";
     uploadInput.addEventListener("change", async () => {
       const file = uploadInput.files?.[0]; if (!file) return;
-      try { await uploadHostFile(selectedHost, [currentPath, file.name].filter(Boolean).join("/"), file); await load(currentPath); }
+      try { await uploadHostFile(selectedHost, [currentPath, file.name].filter(Boolean).join("/"), file, ctx.signal); await load(currentPath); }
       catch (error) { feedback.textContent = message(error); feedback.className = "message error"; }
     });
     uploadLabel.append(uploadInput); panel.append(uploadLabel);

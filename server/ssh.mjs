@@ -11,7 +11,7 @@ export async function loadHosts(path) {
   if (!Array.isArray(value) || value.length > 20) throw new Error("HOSTS_FILE muss eine Liste mit höchstens 20 Hosts enthalten.");
   const ids = new Set();
   for (const host of value) {
-    if (!/^[a-z0-9_-]{1,40}$/.test(host.id) || ids.has(host.id)
+    if (!host || typeof host !== "object" || typeof host.id !== "string" || !/^[a-z0-9_-]{1,40}$/.test(host.id) || ids.has(host.id)
       || typeof host.label !== "string" || typeof host.host !== "string" || !host.host
       || !Number.isInteger(host.port) || host.port < 1 || host.port > 65535
       || typeof host.username !== "string" || !host.username
@@ -44,8 +44,12 @@ async function connect(host) {
 
 async function withClient(host, operation) {
   const client = await connect(host);
-  try { return await operation(client); }
-  finally { client.end(); }
+  let timer;
+  try {
+    return await Promise.race([operation(client), new Promise((_, reject) => {
+      timer = setTimeout(() => { client.end(); reject(Object.assign(new Error("SSH-Zeitlimit überschritten."), { status: 504 })); }, 20000);
+    })]);
+  } finally { clearTimeout(timer); client.end(); }
 }
 
 function getSftp(client) {
@@ -61,10 +65,11 @@ async function realPath(sftp, path) {
 }
 
 async function allowedPath(sftp, host, relative, forCreate = false) {
-  if (typeof relative !== "string" || relative.includes("\0") || relative.startsWith("/") || relative.length > 2048) {
+  if (typeof relative !== "string" || relative.includes("\0") || relative.startsWith("/") || relative.length > 2048 || relative.split("/").includes("..")) {
     throw Object.assign(new Error("Ungültiger Dateipfad."), { status: 400 });
   }
   const root = await realPath(sftp, host.rootPath);
+  if (root === "/") throw Object.assign(new Error("Das Stammverzeichnis darf nicht freigegeben werden."), { status: 403 });
   const clean = posix.normalize(`/${relative}`).slice(1);
   const candidate = posix.join(root, clean);
   const checked = forCreate ? await realPath(sftp, posix.dirname(candidate)) : await realPath(sftp, candidate);
@@ -74,7 +79,7 @@ async function allowedPath(sftp, host, relative, forCreate = false) {
   if (forCreate && (!posix.basename(candidate) || posix.basename(candidate) === ".")) {
     throw Object.assign(new Error("Dateiname fehlt."), { status: 400 });
   }
-  return candidate;
+  return forCreate ? posix.join(checked, posix.basename(candidate)) : checked;
 }
 
 async function execBounded(client, command) {
@@ -100,7 +105,7 @@ export function parseMetrics(output) {
   const delta = total(cpu[1]) - total(cpu[0]); const idle = cpu[1][3] + (cpu[1][4] || 0) - cpu[0][3] - (cpu[0][4] || 0);
   const memoryTotal = Number(memory[1]) * 1024, memoryUsed = (Number(memory[1]) - Number(memory[2])) * 1024;
   const diskTotal = Number(disk[1]) * 1024, diskUsed = Number(disk[2]) * 1024;
-  if (delta <= 0 || memoryTotal <= 0 || diskTotal <= 0) throw new Error("Ungültige Metriken.");
+  if (delta <= 0 || memoryTotal <= 0 || diskTotal <= 0 || memoryUsed < 0 || memoryUsed > memoryTotal || diskUsed < 0 || diskUsed > diskTotal || ![memoryTotal, memoryUsed, diskTotal, diskUsed].every(Number.isSafeInteger)) throw new Error("Ungültige Metriken.");
   return { cpuPercent: Math.max(0, Math.min(100, (1 - idle / delta) * 100)), memoryTotal, memoryUsed, memoryPercent: memoryUsed / memoryTotal * 100, diskTotal, diskUsed, diskPercent: diskUsed / diskTotal * 100, checkedAt: new Date().toISOString() };
 }
 async function metrics(client) {
@@ -134,11 +139,23 @@ export async function handleHostRequest(req, res, url, hosts, bodyBuffer, json) 
       }
       if (action === "download") {
         const path = await allowedPath(sftp, host, relative);
-        const attrs = await call(sftp, "stat", path);
-        if (!attrs.isFile()) throw Object.assign(new Error("Keine Datei."), { status: 400 });
-        if (attrs.size > MAX_FILE_BYTES) throw Object.assign(new Error("Datei zu groß."), { status: 413 });
-        const data = await call(sftp, "readFile", path);
-        if (data.length > MAX_FILE_BYTES) throw Object.assign(new Error("Datei zu groß."), { status: 413 });
+        const handle = await call(sftp, "open", path, "r");
+        let data;
+        try {
+          const attrs = await call(sftp, "fstat", handle);
+          if (!attrs.isFile()) throw Object.assign(new Error("Keine Datei."), { status: 400 });
+          if (attrs.size > MAX_FILE_BYTES) throw Object.assign(new Error("Datei zu groß."), { status: 413 });
+          const chunks = []; let position = 0; const buffer = Buffer.alloc(65536);
+          for (;;) {
+            const size = Math.min(buffer.length, MAX_FILE_BYTES + 1 - position);
+            const bytesRead = await call(sftp, "read", handle, buffer, 0, size, position);
+            if (!bytesRead) break;
+            position += bytesRead;
+            if (position > MAX_FILE_BYTES) throw Object.assign(new Error("Datei zu groß."), { status: 413 });
+            chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
+          }
+          data = Buffer.concat(chunks);
+        } finally { await call(sftp, "close", handle); }
         return { filename: posix.basename(path), data };
       }
       const path = await allowedPath(sftp, host, relative, true);
