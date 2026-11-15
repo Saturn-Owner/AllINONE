@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dualcrypt"
+version = "1.0.0"
+description = "Verschlüsselt Dateien und ganze Ordner mit Zahlenfolge + Geheimwort"
+requires-python = ">=3.12"
+dependencies = ["cryptography>=42"]
+
+[project.scripts]
+dualcrypt = "dualcrypt.cli:main"
+
+[tool.setuptools]
+packages = ["dualcrypt"]
