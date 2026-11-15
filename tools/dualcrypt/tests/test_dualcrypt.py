@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from dualcrypt import cli
+from dualcrypt import actions, cli, menu
 from dualcrypt.core import decrypt_file, encrypt_path
 from dualcrypt.crypto import (
     DecryptReader,
@@ -157,14 +157,13 @@ def test_malicious_archive_blocked(tmp_path):
 
 
 def test_cli_roundtrip(tmp_path, monkeypatch, capsys):
-    import dualcrypt.core as core
-    orig = core.encrypt_path
-    monkeypatch.setattr(cli, "encrypt_path", lambda *a, **k: orig(*a, log2_n=FAST, **k))
+    orig = actions.encrypt_path
+    monkeypatch.setattr(actions, "encrypt_path", lambda *a, **k: orig(*a, log2_n=FAST, **k))
     src = tmp_path / "d"
     src.mkdir()
     (src / "f.txt").write_text("hi")
     answers = iter([Z, W, Z, W])
-    monkeypatch.setattr(cli.getpass, "getpass", lambda _p="": next(answers))
+    monkeypatch.setattr(actions.getpass, "getpass", lambda _p="": next(answers))
     assert cli.main(["encrypt", str(src)]) == 0
     answers = iter([Z, W])
     assert cli.main(["decrypt", str(tmp_path / "d.dcr")]) == 0
@@ -174,5 +173,54 @@ def test_cli_roundtrip(tmp_path, monkeypatch, capsys):
 
 
 def test_cli_rejects_non_digits(monkeypatch):
-    monkeypatch.setattr(cli.getpass, "getpass", lambda _p="": "abc")
+    monkeypatch.setattr(actions.getpass, "getpass", lambda _p="": "abc")
     assert cli.main(["encrypt", "."]) == 1
+
+
+def _menu_inputs(monkeypatch, lines):
+    it = iter(lines)
+    monkeypatch.setattr("builtins.input", lambda _p="": next(it))
+
+
+def test_menu_encrypt_and_decrypt(tmp_path, monkeypatch, capsys):
+    orig = actions.encrypt_path
+    monkeypatch.setattr(actions, "encrypt_path", lambda *a, **k: orig(*a, log2_n=FAST, **k))
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "ordner").mkdir()
+    (tmp_path / "ordner" / "f.txt").write_text("menu")
+    secrets = iter([Z, W, Z, W, Z, W])
+    monkeypatch.setattr(actions.getpass, "getpass", lambda _p="": next(secrets))
+    # 1 = Verschlüsseln, Nummer 1 = ordner, Enter = Standardname; 2 = Entschlüsseln, Nr. 1, Enter; 0 = Ende
+    _menu_inputs(monkeypatch, ["1", "1", "", "2", "1", "", "0"])
+    assert menu.run() == 0
+    assert (tmp_path / "ordner.dcr").is_file()
+    assert (tmp_path / "ordner_entschluesselt" / "ordner" / "f.txt").read_text() == "menu"
+
+
+def test_menu_back_and_invalid_input(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    _menu_inputs(monkeypatch, ["x", "9", "1", "", "2", "", "3", "0"])
+    assert menu.run() == 0
+    out = capsys.readouterr().out
+    assert "Bitte eine Zahl" in out and "So funktioniert" in out
+
+
+def test_menu_shows_errors_and_continues(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.txt").write_text("x")
+    monkeypatch.setattr(actions.getpass, "getpass", lambda _p="": "abc")
+    _menu_inputs(monkeypatch, ["1", "1", "", "0"])
+    assert menu.run() == 0
+    assert "nur aus Ziffern" in capsys.readouterr().err
+
+
+def test_menu_eof_exits(monkeypatch):
+    def eof(_p=""):
+        raise EOFError
+    monkeypatch.setattr("builtins.input", eof)
+    assert menu.run() == 0
+
+
+def test_cli_without_command_opens_menu(monkeypatch):
+    monkeypatch.setattr(cli.menu, "run", lambda: 0)
+    assert cli.main([]) == 0

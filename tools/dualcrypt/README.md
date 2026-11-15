@@ -12,6 +12,10 @@ pip install .          # Python >= 3.12
 
 ## Benutzung
 
+**Menü (am einfachsten):** einfach `dualcrypt` ohne Zusatz starten. Dann per Zahl auswählen, ob du verschlüsseln oder entschlüsseln willst. Dateien/Ordner im aktuellen Verzeichnis werden als Liste angeboten (Nummer wählen) oder du tippst bzw. ziehst einen Pfad hinein. Der vorgeschlagene Ausgabename lässt sich mit Enter übernehmen.
+
+**Direkt per Befehl:**
+
 ```bash
 dualcrypt encrypt MeinOrdner            # -> MeinOrdner.dcr
 dualcrypt decrypt MeinOrdner.dcr        # -> MeinOrdner_entschluesselt/MeinOrdner/...
